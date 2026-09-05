@@ -2,3 +2,4 @@ venv/
 .streamlit/
 __pycache__/
 *.pyc
+data/

@@ -1,3 +1,5 @@
+import os
+import json
 import streamlit as st
 import folium
 import requests
@@ -7,6 +9,15 @@ from streamlit_folium import st_folium
 STOPS_URL = "https://cdn.buenosaires.gob.ar/datosabiertos/datasets/transporte-y-obras-publicas/colectivos-paradas/paradas-de-colectivo.geojson"
 ROUTES_URL = "https://cdn.buenosaires.gob.ar/datosabiertos/datasets/transporte-y-obras-publicas/colectivos-recorridos/recorrido-colectivos.geojson"
 
+DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+STOPS_FILE = os.path.join(DATA_DIR, "paradas-de-colectivo.geojson")
+ROUTES_FILE = os.path.join(DATA_DIR, "recorrido-colectivos.geojson")
+
+DATA_SOURCES = [
+    (STOPS_FILE, STOPS_URL),
+    (ROUTES_FILE, ROUTES_URL),
+]
+
 COLOR_PALETTE = [
     "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
     "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf",
@@ -14,10 +25,29 @@ COLOR_PALETTE = [
 
 
 @st.cache_data(show_spinner=False)
-def load_geojson(url: str) -> dict:
+def load_geojson(path: str, url: str) -> dict:
+    if os.path.exists(path):
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
     resp = requests.get(url, timeout=60)
     resp.raise_for_status()
     return resp.json()
+
+
+@st.cache_data(show_spinner=False)
+def ensure_local_data() -> list:
+    messages = []
+    os.makedirs(DATA_DIR, exist_ok=True)
+    for path, url in DATA_SOURCES:
+        if not os.path.exists(path):
+            resp = requests.get(url, timeout=60)
+            resp.raise_for_status()
+            with open(path, "wb") as f:
+                f.write(resp.content)
+            messages.append(f"Descargado {os.path.basename(path)}")
+        else:
+            messages.append(f"Usando datos locales: {os.path.basename(path)}")
+    return messages
 
 
 @st.cache_data(show_spinner=False)
@@ -93,9 +123,13 @@ st.set_page_config(
 st.title("Panel de Visualización de Transporte")
 st.subheader("Ciudad Autónoma de Buenos Aires - Líneas de colectivo y paradas")
 
-with st.spinner("Descargando datos abiertos de BA Data..."):
-    stops_fc = load_geojson(STOPS_URL)
-    routes_fc = load_geojson(ROUTES_URL)
+data_messages = ensure_local_data()
+for message in data_messages:
+    st.caption(message)
+
+with st.spinner("Cargando datos de colectivos..."):
+    stops_fc = load_geojson(STOPS_FILE, STOPS_URL)
+    routes_fc = load_geojson(ROUTES_FILE, ROUTES_URL)
 
 stops_df = build_stops_table(stops_fc)
 routes_df = build_routes_table(routes_fc)
