@@ -194,7 +194,7 @@ else:
     lon_min, lon_max = stops_df[stops_df["linea"] == linea]["lon"].min(), stops_df[stops_df["linea"] == linea]["lon"].max()
     m.fit_bounds([[lat_min, lon_min], [lat_max, lon_max]], padding=(20, 20))
 
-st_folium(m, width="100%", height=650)
+st_folium(m, width="100%", height=650, returned_objects=[])
 
 with st.expander("Sobre los datos"):
     st.markdown(
