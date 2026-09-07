@@ -143,3 +143,17 @@ streamlit run app.py
 - Commit + push de la migración a la fuente nacional de usos SUBE (AMBA completo).
 - Eventualmente: posiciones en tiempo real de colectivos (API de transporte, pero
   BA Data indica que las APIs/GTFS están suspendidos en revisión).
+
+## Deploy
+
+- La app vive en **Streamlit Community Cloud** (`https://share.streamlit.io`,
+  repo `GuilleFerchero/transporte-caba`, rama `main`, entrypoint `app.py`,
+  Python 3.12). `requirements.txt` fija las versiones del entorno; el primer
+  render de cada sesión descarga ~190 MB de datos (los CSVs de SUBE y GeoJSON) y
+  el free tier suspende la app por inactividad (almacenamiento efímero).
+- **Ventaja de un `Dockerfile` (por qué lo queremos algún día):** con un
+  contenedor (`python:3.12-slim` + `pip install -r requirements.txt` +
+  `CMD streamlit run app.py`) la app corre en cualquier VPS, **los datos viven en
+  un volumen persistente** (se descargan una sola vez, no en cada despertar) y el
+  arranque queda en segundos y siempre disponible, sin los límites de memoria y
+  de suspensión del Cloud gratuito; también permite escalar/aislar por proyecto.
