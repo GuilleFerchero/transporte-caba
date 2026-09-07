@@ -11,6 +11,8 @@ from streamlit_folium import st_folium
 
 STOPS_URL = "https://cdn.buenosaires.gob.ar/datosabiertos/datasets/transporte-y-obras-publicas/colectivos-paradas/paradas-de-colectivo.geojson"
 ROUTES_URL = "https://cdn.buenosaires.gob.ar/datosabiertos/datasets/transporte-y-obras-publicas/colectivos-recorridos/recorrido-colectivos.geojson"
+DEMANDA_2025_URL = "https://data.buenosaires.gob.ar/dataset/indicadores-colectivo/resource/955669d0-b7f0-4b37-9216-520c01fefd43/download"
+DEMANDA_2026_URL = "https://data.buenosaires.gob.ar/dataset/indicadores-colectivo/resource/ba798ae6-a13c-4084-8b33-8d8200f045a0/download"
 RENABAP_AMBA_URL = "https://www.argentina.gob.ar/sites/default/files/renabap-2023-12-06.geojson"
 OSM_STOPS_URL = "https://overpass.kumi.systems/api/interpreter"
 OSM_STOPS_USER_AGENT = "panel-transporte-caba/1.0 (dashboard Streamlit de colectivos AMBA)"
@@ -21,6 +23,8 @@ STOPS_FILE = os.path.join(DATA_DIR, "paradas-de-colectivo.geojson")
 ROUTES_FILE = os.path.join(DATA_DIR, "recorrido-colectivos.geojson")
 RENABAP_AMBA_FILE = os.path.join(DATA_DIR, "renabap_amba.geojson")
 OSM_STOPS_FILE = os.path.join(DATA_DIR, "paradas_amba_osm.geojson")
+DEMANDA_2025_FILE = os.path.join(DATA_DIR, "indicadores_demanda_2025.csv")
+DEMANDA_2026_FILE = os.path.join(DATA_DIR, "indicadores_demanda_2026.csv")
 
 DATA_SOURCES = [
     (STOPS_FILE, STOPS_URL),
@@ -222,6 +226,19 @@ def ensure_local_data() -> list:
         else:
             messages.append(f"Usando datos locales: {os.path.basename(path)}")
 
+    for path, url in (
+        (DEMANDA_2025_FILE, DEMANDA_2025_URL),
+        (DEMANDA_2026_FILE, DEMANDA_2026_URL),
+    ):
+        if not os.path.exists(path):
+            resp = requests.get(url, timeout=120)
+            resp.raise_for_status()
+            with open(path, "wb") as f:
+                f.write(resp.content)
+            messages.append(f"Descargado {os.path.basename(path)}")
+        else:
+            messages.append(f"Indicadores de demanda (local): {os.path.basename(path)}")
+
     if not os.path.exists(RENABAP_AMBA_FILE):
         messages.append("Descargando RE-NABAP nacional y filtrando AMBA...")
         resp = requests.get(RENABAP_AMBA_URL, timeout=300)
@@ -337,6 +354,46 @@ def build_routes_table(fc: dict) -> pd.DataFrame:
             }
         )
     return pd.DataFrame(rows)
+
+
+def _route_distance_m(route_row) -> float:
+    total = 0.0
+    for segment in route_row["coords"]:
+        for i in range(1, len(segment)):
+            lon1, lat1 = segment[i - 1]
+            lon2, lat2 = segment[i]
+            total += _haversine_np(lat1, lon1, lat2, lon2)
+    return float(total)
+
+
+@st.cache_data(show_spinner=False)
+def load_sube_transactions() -> pd.DataFrame:
+    rows = []
+    for path in (DEMANDA_2025_FILE, DEMANDA_2026_FILE):
+        if not os.path.exists(path):
+            continue
+        df = pd.read_csv(path, sep=";", dtype={"linea": str})
+        for col in df.columns:
+            if not col.startswith("trx_total_mes_"):
+                continue
+            suffix = col.replace("trx_total_mes_", "")
+            fecha = pd.Timestamp(year=int(suffix[2:]), month=int(suffix[:2]), day=1)
+            for _, row in df.iterrows():
+                val = row[col]
+                if pd.isna(val) or val == 0:
+                    continue
+                rows.append(
+                    {
+                        "linea": str(row["linea"]).zfill(3),
+                        "fecha": fecha,
+                        "transacciones": int(val),
+                    }
+                )
+    if not rows:
+        return pd.DataFrame(columns=["linea", "fecha", "transacciones"])
+    result = pd.DataFrame(rows).sort_values(["linea", "fecha"])
+    cutoff = result["fecha"].max() - pd.DateOffset(months=11, day=1)
+    return result[result["fecha"] >= cutoff]
 
 
 def _livery_colors(description: str) -> list:
@@ -587,18 +644,20 @@ if real_linea and show_osm_stops:
 
 with col_info:
     if real_linea:
+        total_km = sum(_route_distance_m(row) for _, row in line_routes.iterrows()) / 1000.0
         caption = (
-            f"{len(stops_df[stops_df['linea'] == linea])} paradas y "
-            f"{len(line_routes)} recorridos disponibles "
-            f"(recorrido {recorrido}, {sentido})."
+            f"{len(stops_df[stops_df['linea'] == linea])} paradas, "
+            f"{len(line_routes)} recorridos "
+            f"(recorrido {recorrido}, {sentido}) y {total_km:,.1f} km de recorrido."
         )
         if show_osm_stops:
             caption += f" Paradas AMBA (OSM): {len(osm_match)}."
         st.caption(caption)
     elif linea == "Todas las líneas":
+        total_km = sum(_route_distance_m(row) for _, row in routes_df.iterrows()) / 1000.0
         st.caption(
             f"{len(stops_df)} paradas y {len(routes_df)} recorridos "
-            f"para {len(lineas)} líneas."
+            f"para {len(lineas)} líneas ({total_km:,.0f} km totales de recorrido)."
         )
     else:
         st.caption("Seleccioná una línea para ver sus recorridos y paradas, o mostrá todas las líneas.")
@@ -653,6 +712,20 @@ if show_renabap:
 
 st_folium(m, width="100%", height=650, returned_objects=[])
 
+if real_linea:
+    sube = load_sube_transactions()
+    line_sube = sube[sube["linea"] == linea]
+    if line_sube.empty:
+        st.info(f"No hay indicadores de transacciones SUBE para la línea {linea}.")
+    else:
+        st.subheader(f"Transacciones SUBE - Línea {linea}")
+        chart_df = line_sube[["fecha", "transacciones"]].set_index("fecha")
+        st.line_chart(chart_df)
+        st.caption(
+            f"Fuente: BA Data - Indicadores de colectivos (demanda). "
+            f"Datos mensuales de {line_sube['fecha'].min():%m/%Y} a {line_sube['fecha'].max():%m/%Y}."
+        )
+
 with st.expander("Sobre los datos"):
     st.markdown(
         "Fuente: [BA Data](https://data.buenosaires.gob.ar) - "
@@ -663,6 +736,8 @@ with st.expander("Sobre los datos"):
         "(Registro Nacional de Barrios Populares, dataset 2023 filtrado a AMBA). "
         "Paradas del conurbano: [OpenStreetMap](https://www.openstreetmap.org) "
         "(paradas de colectivo descargadas vía Overpass, filtradas por proximidad al recorrido). "
+        "Transacciones SUBE: [Indicadores de colectivos](https://data.buenosaires.gob.ar/dataset/indicadores-colectivo) "
+        "(indicadores de demanda, transacciones mensuales por línea). "
         "Los recorridos se colorean según la librea definida por línea (colores cargados "
         "manualmente en lineas_colores.xlsx); el sentido se indica en el tooltip de "
         "cada trazo."
