@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import unicodedata
 import numpy as np
@@ -11,8 +12,8 @@ from streamlit_folium import st_folium
 
 STOPS_URL = "https://cdn.buenosaires.gob.ar/datosabiertos/datasets/transporte-y-obras-publicas/colectivos-paradas/paradas-de-colectivo.geojson"
 ROUTES_URL = "https://cdn.buenosaires.gob.ar/datosabiertos/datasets/transporte-y-obras-publicas/colectivos-recorridos/recorrido-colectivos.geojson"
-DEMANDA_2025_URL = "https://data.buenosaires.gob.ar/dataset/indicadores-colectivo/resource/955669d0-b7f0-4b37-9216-520c01fefd43/download"
-DEMANDA_2026_URL = "https://data.buenosaires.gob.ar/dataset/indicadores-colectivo/resource/ba798ae6-a13c-4084-8b33-8d8200f045a0/download"
+SUBE_USOS_2025_URL = "https://archivos-datos.transporte.gob.ar/upload/Dat_Ab_Usos/dat-ab-usos-2025.csv"
+SUBE_USOS_2026_URL = "https://archivos-datos.transporte.gob.ar/upload/Dat_Ab_Usos/dat-ab-usos-2026.csv"
 RENABAP_AMBA_URL = "https://www.argentina.gob.ar/sites/default/files/renabap-2023-12-06.geojson"
 OSM_STOPS_URL = "https://overpass.kumi.systems/api/interpreter"
 OSM_STOPS_USER_AGENT = "panel-transporte-caba/1.0 (dashboard Streamlit de colectivos AMBA)"
@@ -23,8 +24,8 @@ STOPS_FILE = os.path.join(DATA_DIR, "paradas-de-colectivo.geojson")
 ROUTES_FILE = os.path.join(DATA_DIR, "recorrido-colectivos.geojson")
 RENABAP_AMBA_FILE = os.path.join(DATA_DIR, "renabap_amba.geojson")
 OSM_STOPS_FILE = os.path.join(DATA_DIR, "paradas_amba_osm.geojson")
-DEMANDA_2025_FILE = os.path.join(DATA_DIR, "indicadores_demanda_2025.csv")
-DEMANDA_2026_FILE = os.path.join(DATA_DIR, "indicadores_demanda_2026.csv")
+SUBE_USOS_2025_FILE = os.path.join(DATA_DIR, "dat-ab-usos-2025.csv")
+SUBE_USOS_2026_FILE = os.path.join(DATA_DIR, "dat-ab-usos-2026.csv")
 
 DATA_SOURCES = [
     (STOPS_FILE, STOPS_URL),
@@ -227,17 +228,17 @@ def ensure_local_data() -> list:
             messages.append(f"Usando datos locales: {os.path.basename(path)}")
 
     for path, url in (
-        (DEMANDA_2025_FILE, DEMANDA_2025_URL),
-        (DEMANDA_2026_FILE, DEMANDA_2026_URL),
+        (SUBE_USOS_2025_FILE, SUBE_USOS_2025_URL),
+        (SUBE_USOS_2026_FILE, SUBE_USOS_2026_URL),
     ):
         if not os.path.exists(path):
-            resp = requests.get(url, timeout=120)
+            resp = requests.get(url, timeout=600)
             resp.raise_for_status()
             with open(path, "wb") as f:
                 f.write(resp.content)
             messages.append(f"Descargado {os.path.basename(path)}")
         else:
-            messages.append(f"Indicadores de demanda (local): {os.path.basename(path)}")
+            messages.append(f"Usos SUBE diarios (local): {os.path.basename(path)}")
 
     if not os.path.exists(RENABAP_AMBA_FILE):
         messages.append("Descargando RE-NABAP nacional y filtrando AMBA...")
@@ -366,34 +367,66 @@ def _route_distance_m(route_row) -> float:
     return float(total)
 
 
+def _normalize_sube_linea(code) -> str | None:
+    if code is None or pd.isna(code):
+        return None
+    m = re.search(r"(\d+)", str(code))
+    if not m:
+        return None
+    n = int(m.group(1))
+    return f"{n:03d}" if n > 0 else None
+
+
+def _is_caba_sube_row(code, jurisdiccion) -> bool:
+    cu = "" if code is None else str(code).strip().upper()
+    if cu.startswith(("CABA", "BSAS_LINEA", "BS_ASLINEA")):
+        return True
+    if "RZ" in cu or not cu:
+        return False
+    jur = "" if jurisdiccion is None else str(jurisdiccion).strip()
+    return jur.upper() in ("NACIONAL", "C.A.B.A")
+
+
 @st.cache_data(show_spinner=False)
 def load_sube_transactions() -> pd.DataFrame:
-    rows = []
-    for path in (DEMANDA_2025_FILE, DEMANDA_2026_FILE):
+    monthly = []
+    daymap = []
+    for path in (SUBE_USOS_2025_FILE, SUBE_USOS_2026_FILE):
         if not os.path.exists(path):
             continue
-        df = pd.read_csv(path, sep=";", dtype={"linea": str})
-        for col in df.columns:
-            if not col.startswith("trx_total_mes_"):
-                continue
-            suffix = col.replace("trx_total_mes_", "")
-            fecha = pd.Timestamp(year=int(suffix[2:]), month=int(suffix[:2]), day=1)
-            for _, row in df.iterrows():
-                val = row[col]
-                if pd.isna(val) or val == 0:
-                    continue
-                rows.append(
-                    {
-                        "linea": str(row["linea"]).zfill(3),
-                        "fecha": fecha,
-                        "transacciones": int(val),
-                    }
-                )
-    if not rows:
+        df = pd.read_csv(
+            path,
+            usecols=[
+                "DIA_TRANSPORTE", "LINEA", "AMBA", "TIPO_TRANSPORTE",
+                "JURISDICCION", "CANTIDAD",
+            ],
+            dtype={"LINEA": str},
+        )
+        df["AMBA"] = df["AMBA"].str.strip().str.upper()
+        df["TIP"] = df["TIPO_TRANSPORTE"].str.strip().str.upper()
+        pref = df["LINEA"].astype(str).str.strip().str.upper()
+        ok = pref.str.startswith(("CABA", "BSAS_LINEA", "BS_ASLINEA")) | (
+            (~pref.str.contains("RZ"))
+            & df["JURISDICCION"].fillna("").str.strip().str.upper().isin(["NACIONAL", "C.A.B.A"])
+        )
+        df = df[ok & (df["AMBA"] == "SI") & (df["TIP"] == "COLECTIVO")].copy()
+        df["linea"] = df["LINEA"].apply(_normalize_sube_linea)
+        df = df.dropna(subset=["linea"])
+        df["fecha"] = pd.to_datetime(df["DIA_TRANSPORTE"]).dt.to_period("M").dt.to_timestamp()
+        monthly.append(df.groupby(["linea", "fecha"], as_index=False)["CANTIDAD"].sum())
+        daymap.append(df[["fecha", "DIA_TRANSPORTE"]])
+    if not monthly:
         return pd.DataFrame(columns=["linea", "fecha", "transacciones"])
-    result = pd.DataFrame(rows).sort_values(["linea", "fecha"])
-    cutoff = result["fecha"].max() - pd.DateOffset(months=11, day=1)
-    return result[result["fecha"] >= cutoff]
+    result = pd.concat(monthly).rename(columns={"CANTIDAD": "transacciones"})
+    ultimo_dia = (
+        pd.concat(daymap).groupby("fecha")["DIA_TRANSPORTE"].max().sort_index()
+    )
+    last = ultimo_dia.index.max()
+    if pd.to_datetime(ultimo_dia[last]).day < last.days_in_month:
+        result = result[result["fecha"] < last]
+    result = result.sort_values(["linea", "fecha"])
+    cutoff = result["fecha"].max() - pd.DateOffset(months=11)
+    return result[result["fecha"] >= cutoff].reset_index(drop=True)
 
 
 def _livery_colors(description: str) -> list:
@@ -722,8 +755,9 @@ if real_linea:
         chart_df = line_sube[["fecha", "transacciones"]].set_index("fecha")
         st.line_chart(chart_df)
         st.caption(
-            f"Fuente: BA Data - Indicadores de colectivos (demanda). "
-            f"Datos mensuales de {line_sube['fecha'].min():%m/%Y} a {line_sube['fecha'].max():%m/%Y}."
+            f"Fuente: Secretaría de Transporte (datos.transporte.gob.ar) - "
+            f"transacciones SUBE (usos) por fecha. Usos diarios agregados por mes "
+            f"(AMBA), de {line_sube['fecha'].min():%m/%Y} a {line_sube['fecha'].max():%m/%Y}."
         )
 
 with st.expander("Sobre los datos"):
@@ -736,8 +770,9 @@ with st.expander("Sobre los datos"):
         "(Registro Nacional de Barrios Populares, dataset 2023 filtrado a AMBA). "
         "Paradas del conurbano: [OpenStreetMap](https://www.openstreetmap.org) "
         "(paradas de colectivo descargadas vía Overpass, filtradas por proximidad al recorrido). "
-        "Transacciones SUBE: [Indicadores de colectivos](https://data.buenosaires.gob.ar/dataset/indicadores-colectivo) "
-        "(indicadores de demanda, transacciones mensuales por línea). "
+        "Transacciones SUBE: [Secretaría de Transporte](https://datos.transporte.gob.ar) - "
+        "[Cantidad de transacciones SUBE (usos) por fecha](https://datos.transporte.gob.ar/dataset/sube-cantidad-de-transacciones-usos-por-fecha) "
+        "(usos diarios por línea en AMBA, agregados mensualmente). "
         "Los recorridos se colorean según la librea definida por línea (colores cargados "
         "manualmente en lineas_colores.xlsx); el sentido se indica en el tooltip de "
         "cada trazo."

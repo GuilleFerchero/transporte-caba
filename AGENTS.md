@@ -16,9 +16,12 @@ Gobierno de la Ciudad (BA Data).
 - En "Todas las líneas": dibuja los 1104 recorridos, cada línea con un color de una
   paleta (10 colores cíclicos, `color_for_line()`).
 - Al seleccionar una línea: además del mapa muestra un **gráfico de línea** con el
-  evolutivo mensual de **transacciones SUBE** (fuente: "Indicadores de colectivos"
-  de BA Data, indicadores de demanda) y el caption informa la **distancia del
-  recorrido en km** (suma de distancias haversine punto a punto).
+  evolutivo mensual de **transacciones SUBE (usos)** por línea para todo el **AMBA**
+  (fuente: dataset nacional "Cantidad de transacciones SUBE (usos) por fecha" de la
+  Secretaría de Transporte) y el caption informa la **distancia del recorrido en km**
+  (suma de distancias haversine punto a punto).
+- El gráfico cubre los últimos 12 meses de usos diarios agregados por mes; se
+  descartan las líneas sin datos y el mes en curso si está incompleto.
 
 ## Fuentes de datos (BA Data, licencia CC-BY-2.5-AR)
 
@@ -31,34 +34,41 @@ Gobierno de la Ciudad (BA Data).
   - Propiedades: `DIRECCION`, `BARRIO`, `COMUNA` y campos `L1`..`L6` (líneas que
     pasan por esa parada, string o null). Hay un valor corrupto `'V'` en algún campo
     L* que se descarta (solo se aceptan valores `isdigit()`).
-- **Transacciones SUBE**: `Indicadores de colectivos` → "2025/2026 - Indicadores
-  sobre la demanda" (CSV, `indicadores_demanda_2025.csv` y `indicadores_demanda_2026.csv`,
-  ~11 KB y ~6 KB).
-  - Formato ancho: una fila por línea, columnas `trx_total_mes_MMYYYY` con el total
-    de transacciones del mes (y porcentajes SUBE físico/app, QR y tarjetas de
-    transporte). Cobertura actual: dic 2024 a jul 2026. Solo jurisdicción CABA
-    (líneas 4, 6, 7, 12, 25, 26, 34, 39, 42, 44, 47, 50, 61, 62, 64, 65, 68, 76, 84,
-    90, 99, 102, 106, 107, 108, 109, 115, 118, 132, 151, eBUS).
-  - Los CSV de demanda tienen recursos anuales; si BA Data renueva el dataset hay
-    que actualizar las URLs en `DEMANDA_2025_URL`/`DEMANDA_2026_URL`.
+- **Transacciones SUBE**: Secretaría de Transporte (datos.transporte.gob.ar) →
+  "SUBE - Cantidad de transacciones (usos) por fecha" (CSV diario por línea,
+  `dat-ab-usos-2025.csv` y `dat-ab-usos-2026.csv`, ~65 MB y ~47 MB).
+  - Una fila por día-línea. Columnas: `DIA_TRANSPORTE`, `NOMBRE_EMPRESA`, `LINEA`,
+    `AMBA` (SI/NO), `TIPO_TRANSPORTE`, `JURISDICCION`, `PROVINCIA`, `MUNICIPIO`,
+    `CANTIDAD`, `DATO_PRELIMINAR`. Cobertura diaria de todo el país; se filtra
+    `AMBA=SI` + `TIPO_TRANSPORTE=COLECTIVO`.
+  - Identificación de líneas CABA: las líneas nacionales salen como `JURISDICCION`
+    `NACIONAL` (códigos `LINEA N`, `BSAS_LINEA_XXX`, `BS_ASLINEA_XXX`) o `C.A.B.A`
+    (códigos `CABA_LINEA_XXX`, que desde 2026 son los dominantes). Se excluyen
+    códigos con `RZ` (Zárate) y los numéricos pelados de municipios del interior.
+    Ver `_is_caba_sube_row()`.
+  - Coherencia verificada contra el dataset de demanda de BA Data (mediana +0,17%);
+    las diferencias >5% son líneas largas de conurbano donde el dato nacional suma
+    el AMBA completo, lo cual es el objetivo.
+  - Hay recursos anuales; si el dataset renueva años hay que agregar/actualizar las
+    URLs en `SUBE_USOS_2025_URL`/`SUBE_USOS_2026_URL`.
 - URL de descarga (fallback):
   - https://cdn.buenosaires.gob.ar/datosabiertos/datasets/transporte-y-obras-publicas/colectivos-recorridos/recorrido-colectivos.geojson
   - https://cdn.buenosaires.gob.ar/datosabiertos/datasets/transporte-y-obras-publicas/colectivos-paradas/paradas-de-colectivo.geojson
-  - https://data.buenosaires.gob.ar/dataset/indicadores-colectivo/resource/955669d0-b7f0-4b37-9216-520c01fefd43/download (demanda 2025)
-  - https://data.buenosaires.gob.ar/dataset/indicadores-colectivo/resource/ba798ae6-a13c-4084-8b33-8d8200f045a0/download (demanda 2026)
+  - https://archivos-datos.transporte.gob.ar/upload/Dat_Ab_Usos/dat-ab-usos-2025.csv (usos SUBE 2025)
+  - https://archivos-datos.transporte.gob.ar/upload/Dat_Ab_Usos/dat-ab-usos-2026.csv (usos SUBE 2026)
 
 ## Arquitectura de datos (importante)
 
 - Los datos viven en la carpeta **`data/`** (local, NO versionada en git, está en `.gitignore`).
   - `data/paradas-de-colectivo.geojson`
   - `data/recorrido-colectivos.geojson`
-  - `data/indicadores_demanda_2025.csv` y `data/indicadores_demanda_2026.csv`
+  - `data/dat-ab-usos-2025.csv` y `data/dat-ab-usos-2026.csv`
 - `ensure_local_data()` crea `data/` y, si falta algún archivo, lo descarga de BA Data.
 - `load_geojson(path, url)` lee el archivo local; si no existe, descarga.
-- `load_sube_transactions()` lee los CSV de demanda (sep `;`), parsea las columnas
-  `trx_total_mes_MMYYYY` a formato largo `(linea, fecha, transacciones)` y filtra a
-  los **últimos 12 meses** disponibles. La línea se normaliza con `zfill(3)` como en
-  el resto.
+- `load_sube_transactions()` lee los CSV de usos diarios (`AMBA=SI` + colectivo +
+  líneas CABA por patrón de código), los agrega a **últimos 12 meses** y devuelve
+  formato largo `(linea, fecha, transacciones)`. Se descarta el mes en curso si
+  está incompleto (último día < fin de mes). La línea se normaliza con `zfill(3)`.
 - `_route_distance_m(route_row)` suma distancias haversine punto a punto sobre las
   coordenadas del recorrido (devuelve metros). La distancia por línea (km) se resume
   en el caption.
@@ -72,7 +82,14 @@ Gobierno de la Ciudad (BA Data).
   estado del mapa (bounds, zoom, clics) en cada interacción y eso provoca que
   Streamlit re-ejecute el script. Se corrigió con `returned_objects=[]` en la
   llamada `st_folium(m, width="100%", height=650, returned_objects=[])`.
-  → ESE CAMBIO AÚN NO ESTÁ COMMITEADO. Commit pendiente.
+  (Commiteado en `4e4013a`.)
+- Normalización de líneas en SUBE nacional: los códigos son inconsistentes entre
+  años y jurisdicciones. Regla usada en `_is_caba_sube_row()`: códigos con prefijo
+  `CABA`/`BSAS_LINEA`/`BS_ASLINEA` → siempre CABA; los `LINEA N` pelados solo si
+  `JURISDICCION` es `NACIONAL` o `C.A.B.A`; se descartan `RZ`. El número de línea
+  se extrae como el primer grupo de dígitos (`re.search(r"\d+")`). NO filtras solo
+  con `AMBA=SI`: colisionan líneas homónimas de Mercedes/Zárate (ej. `LINEA 1`,
+  `RZ-1`).
 - Normalización de líneas: en recorridos la línea es "001" (3 dígitos), en paradas
   puede ser "22" o "1". Se normaliza con `str(linea).zfill(3)` en ambas tablas.
 - Tabla de paradas se arma en formato largo (1 fila por parada × línea que la sirve)
@@ -106,17 +123,17 @@ streamlit run app.py
   - `241d660` Agregar app.py (mapa base)
   - `b10849a` Visualización de líneas de colectivo y paradas con datos de BA Data
   - `1afb41d` Lectura local de `data/` con descarga como respaldo; `data/` en .gitignore
-- **PENDIENTE**: commitear y pushear el cambio `returned_objects=[]` (app.py),
-  las nuevas features de SUBE + distancia, y el AGENTS.md.
+  - `4e4013a` Evolutivo mensual de transacciones SUBE por línea + distancia en km;
+    fix de reruns `returned_objects=[]`; AGENTS.md
 
 ## Entorno
 
-- Windows, shell PowerShell. Python 3.13.2.
-- Librerías instaladas (global, sin venv): streamlit 1.62.0, folium 0.20.0,
-  streamlit-folium 0.27.4, pandas 2.2.3, requests 2.32.3.
+- Windows, shell PowerShell. Python 3.13.2. La app corre en el venv `venv/` del repo.
+- Librerías: streamlit 1.62.0, folium 0.20.0, streamlit-folium 0.27.4, pandas 2.2.3,
+  requests 2.32.3.
 
 ## Pendientes / ideas
 
-- Commit + push del fix de reruns, las features de SUBE + distancia y este AGENTS.md.
+- Commit + push de la migración a la fuente nacional de usos SUBE (AMBA completo).
 - Eventualmente: posiciones en tiempo real de colectivos (API de transporte, pero
   BA Data indica que las APIs/GTFS están suspendidos en revisión).
