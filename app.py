@@ -3,6 +3,7 @@ import re
 import json
 import unicodedata
 import numpy as np
+import altair as alt
 import streamlit as st
 import folium
 import requests
@@ -12,6 +13,7 @@ from streamlit_folium import st_folium
 
 STOPS_URL = "https://cdn.buenosaires.gob.ar/datosabiertos/datasets/transporte-y-obras-publicas/colectivos-paradas/paradas-de-colectivo.geojson"
 ROUTES_URL = "https://cdn.buenosaires.gob.ar/datosabiertos/datasets/transporte-y-obras-publicas/colectivos-recorridos/recorrido-colectivos.geojson"
+SUBE_USOS_2024_URL = "https://archivos-datos.transporte.gob.ar/upload/Dat_Ab_Usos/dat-ab-usos-2024.csv"
 SUBE_USOS_2025_URL = "https://archivos-datos.transporte.gob.ar/upload/Dat_Ab_Usos/dat-ab-usos-2025.csv"
 SUBE_USOS_2026_URL = "https://archivos-datos.transporte.gob.ar/upload/Dat_Ab_Usos/dat-ab-usos-2026.csv"
 RENABAP_AMBA_URL = "https://www.argentina.gob.ar/sites/default/files/renabap-2023-12-06.geojson"
@@ -24,6 +26,7 @@ STOPS_FILE = os.path.join(DATA_DIR, "paradas-de-colectivo.geojson")
 ROUTES_FILE = os.path.join(DATA_DIR, "recorrido-colectivos.geojson")
 RENABAP_AMBA_FILE = os.path.join(DATA_DIR, "renabap_amba.geojson")
 OSM_STOPS_FILE = os.path.join(DATA_DIR, "paradas_amba_osm.geojson")
+SUBE_USOS_2024_FILE = os.path.join(DATA_DIR, "dat-ab-usos-2024.csv")
 SUBE_USOS_2025_FILE = os.path.join(DATA_DIR, "dat-ab-usos-2025.csv")
 SUBE_USOS_2026_FILE = os.path.join(DATA_DIR, "dat-ab-usos-2026.csv")
 
@@ -228,6 +231,7 @@ def ensure_local_data() -> list:
             messages.append(f"Usando datos locales: {os.path.basename(path)}")
 
     for path, url in (
+        (SUBE_USOS_2024_FILE, SUBE_USOS_2024_URL),
         (SUBE_USOS_2025_FILE, SUBE_USOS_2025_URL),
         (SUBE_USOS_2026_FILE, SUBE_USOS_2026_URL),
     ):
@@ -367,6 +371,32 @@ def _route_distance_m(route_row) -> float:
     return float(total)
 
 
+def _dx_dy_m(lat1, lon1, lat2, lon2):
+    lat_m = 111_320.0
+    lon_m = lat_m * np.cos(np.radians((float(lat1) + float(lat2)) / 2.0))
+    dx = (float(lon2) - float(lon1)) * lon_m
+    dy = (float(lat2) - float(lat1)) * lat_m
+    return dx, dy
+
+
+def _euclidean_route_distance_m(route_row) -> float:
+    total = 0.0
+    for segment in route_row["coords"]:
+        for i in range(1, len(segment)):
+            dx, dy = _dx_dy_m(*segment[i - 1], *segment[i])
+            total += np.hypot(dx, dy)
+    return float(total)
+
+
+def _manhattan_route_distance_m(route_row) -> float:
+    total = 0.0
+    for segment in route_row["coords"]:
+        for i in range(1, len(segment)):
+            dx, dy = _dx_dy_m(*segment[i - 1], *segment[i])
+            total += abs(dx) + abs(dy)
+    return float(total)
+
+
 def _normalize_sube_linea(code) -> str | None:
     if code is None or pd.isna(code):
         return None
@@ -391,7 +421,7 @@ def _is_caba_sube_row(code, jurisdiccion) -> bool:
 def load_sube_transactions() -> pd.DataFrame:
     monthly = []
     daymap = []
-    for path in (SUBE_USOS_2025_FILE, SUBE_USOS_2026_FILE):
+    for path in (SUBE_USOS_2024_FILE, SUBE_USOS_2025_FILE, SUBE_USOS_2026_FILE):
         if not os.path.exists(path):
             continue
         df = pd.read_csv(
@@ -425,7 +455,7 @@ def load_sube_transactions() -> pd.DataFrame:
     if pd.to_datetime(ultimo_dia[last]).day < last.days_in_month:
         result = result[result["fecha"] < last]
     result = result.sort_values(["linea", "fecha"])
-    cutoff = result["fecha"].max() - pd.DateOffset(months=11)
+    cutoff = result["fecha"].max() - pd.DateOffset(months=23)
     return result[result["fecha"] >= cutoff].reset_index(drop=True)
 
 
@@ -561,6 +591,121 @@ def _fmt(n, suffix="", default="s/d"):
         return default
 
 
+def _fmt_dec(n, decimals=1, suffix=""):
+    if n is None or (isinstance(n, float) and n != n):
+        return "s/d"
+    try:
+        return f"{float(n):,.{decimals}f}".replace(",", "X").replace(".", ",").replace("X", ".") + suffix
+    except (TypeError, ValueError):
+        return "s/d"
+
+
+_THEME_CSS = """
+<style>
+html, body, .stApp, .stApp * {
+    font-family: "Calibri", "Segoe UI", Tahoma, Arial, sans-serif !important;
+}
+.app-header {
+    border-bottom: 1px solid #2a3142;
+    padding-bottom: 10px;
+    margin-bottom: 6px;
+}
+div.metric-box {
+    background: linear-gradient(160deg, #1b2232 0%, #131824 100%);
+    border: 1px solid #2d3548;
+    border-radius: 16px;
+    padding: 16px 20px 18px 20px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, .38);
+}
+div.metric-box .mb-label {
+    color: #8b95ab;
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: .7px;
+    text-transform: uppercase;
+}
+div.metric-box .mb-value {
+    color: #ffffff;
+    font-size: 52px;
+    font-weight: 700;
+    line-height: 1.05;
+    margin-top: 4px;
+    font-variant-numeric: tabular-nums;
+}
+div.metric-box .mb-value small {
+    font-size: 22px;
+    font-weight: 600;
+    color: #aeb8cc;
+    margin-left: 6px;
+}
+div.metric-box .mb-sub {
+    margin-top: 12px;
+    border-top: 1px solid #2d3548;
+    padding-top: 10px;
+    font-size: 15px;
+    color: #aeb8cc;
+    display: flex;
+    justify-content: space-between;
+    gap: 14px;
+}
+div.metric-box .mb-sub .num {
+    color: #ffffff;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+}
+div.tx-detached {
+    margin-top: 92px;
+}
+div.mb-delta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 10px;
+}
+span.delta-pill {
+    border-radius: 20px;
+    padding: 4px 11px;
+    font-size: 13px;
+    font-weight: 700;
+    white-space: nowrap;
+}
+span.delta-pill.up {
+    color: #3ddc84;
+    background: rgba(61, 220, 132, .14);
+}
+span.delta-pill.down {
+    color: #ff7b7b;
+    background: rgba(255, 123, 123, .14);
+}
+span.delta-pill.flat {
+    color: #aeb8cc;
+    background: rgba(174, 184, 204, .14);
+}
+</style>
+"""
+
+
+def _metric_box_html(label: str, value_html: str, sub_html: str = "", badges_html: str = "") -> str:
+    sub = f'<div class="mb-sub">{sub_html}</div>' if sub_html else ""
+    badges = f'<div class="mb-delta">{badges_html}</div>' if badges_html else ""
+    return (
+        f'<div class="metric-box"><div class="mb-label">{label}</div>'
+        f'<div class="mb-value">{value_html}</div>{sub}{badges}</div>'
+    )
+
+
+def _delta_pill_html(pct) -> str:
+    if pct is None:
+        return '<span class="delta-pill flat">—</span>'
+    if pct > 0:
+        cls, arrow = "up", "▲"
+    elif pct < 0:
+        cls, arrow = "down", "▼"
+    else:
+        cls, arrow = "flat", "▬"
+    return f'<span class="delta-pill {cls}">{arrow} {_fmt_dec(abs(pct))}%</span>'
+
+
 def draw_renabap(m, fc, color=RENABAP_COLOR):
     def style_fn(feature):
         return {
@@ -600,6 +745,8 @@ st.set_page_config(
     page_icon="🚌",
     layout="wide",
 )
+
+st.markdown(_THEME_CSS, unsafe_allow_html=True)
 
 st.title("Panel de Visualización de Transporte")
 st.subheader("Ciudad Autónoma de Buenos Aires - Líneas de colectivo y paradas")
@@ -675,17 +822,92 @@ if real_linea and show_osm_stops:
                 lons.extend(float(c[0]) for c in segment)
         osm_match = osm_stops_for_line(osm_stops_all, lats, lons)
 
+line_sube = pd.DataFrame()
+if real_linea:
+    line_sube = load_sube_transactions()
+    line_sube = line_sube[line_sube["linea"] == linea]
+
 with col_info:
     if real_linea:
         total_km = sum(_route_distance_m(row) for _, row in line_routes.iterrows()) / 1000.0
+        euclid_km = sum(_euclidean_route_distance_m(row) for _, row in line_routes.iterrows()) / 1000.0
+        manhattan_km = sum(_manhattan_route_distance_m(row) for _, row in line_routes.iterrows()) / 1000.0
         caption = (
             f"{len(stops_df[stops_df['linea'] == linea])} paradas, "
             f"{len(line_routes)} recorridos "
-            f"(recorrido {recorrido}, {sentido}) y {total_km:,.1f} km de recorrido."
+            f"(recorrido {recorrido}, {sentido})."
         )
         if show_osm_stops:
             caption += f" Paradas AMBA (OSM): {len(osm_match)}."
         st.caption(caption)
+
+        dist_col, tx_col = st.columns([2, 1])
+        with dist_col:
+            st.markdown(
+                _metric_box_html(
+                    f"Recorrido · Línea {linea}",
+                    f'{_fmt_dec(total_km)}<small>km</small>',
+                    '<span>Distancia por la ruta (gran círculo)</span>',
+                ),
+                unsafe_allow_html=True,
+            )
+            st.markdown(
+                _metric_box_html(
+                    "Distancia Euclidiana",
+                    f'{_fmt_dec(euclid_km)}<small>km</small>',
+                    '<span>Línea recta proyectada en el plano</span>',
+                ),
+                unsafe_allow_html=True,
+            )
+            st.markdown(
+                _metric_box_html(
+                    "Distancia Manhattan",
+                    f'{_fmt_dec(manhattan_km)}<small>km</small>',
+                    '<span>Camino en cuadrícula: |Δx| + |Δy|</span>',
+                ),
+                unsafe_allow_html=True,
+            )
+        with tx_col:
+            if line_sube.empty:
+                tx_html = _metric_box_html(
+                    f"Transacciones SUBE · Línea {linea}",
+                    "s/d",
+                )
+            else:
+                sube_12 = line_sube.tail(12)
+                prom_mensual = sube_12["transacciones"].mean()
+                total_anual = sube_12["transacciones"].sum()
+
+                delta_anual = None
+                if len(line_sube) >= 24:
+                    prev_total = line_sube.iloc[:-12]["transacciones"].sum()
+                    if prev_total:
+                        delta_anual = (total_anual - prev_total) / prev_total * 100.0
+
+                delta_mensual = None
+                if len(line_sube) >= 2:
+                    prev_month = line_sube["transacciones"].iloc[-2]
+                    if prev_month:
+                        last_month = line_sube["transacciones"].iloc[-1]
+                        delta_mensual = (last_month - prev_month) / prev_month * 100.0
+
+                badges = (
+                    f'{_delta_pill_html(delta_anual)}<span style="color:#8b95ab;font-size:13px;">vs año anterior</span> '
+                    f'{_delta_pill_html(delta_mensual)}<span style="color:#8b95ab;font-size:13px;">vs mes anterior</span>'
+                )
+                tx_html = _metric_box_html(
+                    f"Transacciones SUBE · Línea {linea}",
+                    f'{_fmt(prom_mensual)}<small>prom. mensual</small>',
+                    (
+                        f'<span>Total últimos 12 meses</span>'
+                        f'<span class="num">{_fmt(total_anual)}</span>'
+                    ),
+                    badges,
+                )
+            st.markdown(
+                f'<div class="tx-detached">{tx_html}</div>',
+                unsafe_allow_html=True,
+            )
     elif linea == "Todas las líneas":
         total_km = sum(_route_distance_m(row) for _, row in routes_df.iterrows()) / 1000.0
         st.caption(
@@ -746,18 +968,26 @@ if show_renabap:
 st_folium(m, width="100%", height=650, returned_objects=[])
 
 if real_linea:
-    sube = load_sube_transactions()
-    line_sube = sube[sube["linea"] == linea]
     if line_sube.empty:
         st.info(f"No hay indicadores de transacciones SUBE para la línea {linea}.")
     else:
         st.subheader(f"Transacciones SUBE - Línea {linea}")
-        chart_df = line_sube[["fecha", "transacciones"]].set_index("fecha")
-        st.line_chart(chart_df)
+        color, _ = route_colors(LINE_COLORS.get(linea))
+        point = alt.OverlayMarkDef(color=color, filled=True, size=80, strokeWidth=0)
+        sube_12 = line_sube.tail(12)
+        chart = (
+            alt.Chart(sube_12[["fecha", "transacciones"]].copy())
+            .mark_line(color=color, point=point)
+            .encode(
+                x=alt.X("fecha:T", title="Mes", axis=alt.Axis(format="%m/%Y", grid=True)),
+                y=alt.Y("transacciones:Q", title="Transacciones", axis=alt.Axis(format="~s")),
+            )
+        )
+        st.altair_chart(chart, width="stretch")
         st.caption(
             f"Fuente: Secretaría de Transporte (datos.transporte.gob.ar) - "
             f"transacciones SUBE (usos) por fecha. Usos diarios agregados por mes "
-            f"(AMBA), de {line_sube['fecha'].min():%m/%Y} a {line_sube['fecha'].max():%m/%Y}."
+            f"(AMBA), de {sube_12['fecha'].min():%m/%Y} a {sube_12['fecha'].max():%m/%Y}."
         )
 
 with st.expander("Sobre los datos"):

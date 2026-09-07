@@ -50,10 +50,13 @@ Gobierno de la Ciudad (BA Data).
     las diferencias >5% son líneas largas de conurbano donde el dato nacional suma
     el AMBA completo, lo cual es el objetivo.
   - Hay recursos anuales; si el dataset renueva años hay que agregar/actualizar las
-    URLs en `SUBE_USOS_2025_URL`/`SUBE_USOS_2026_URL`.
+    URLs en `SUBE_USOS_2024_URL`/`SUBE_USOS_2025_URL`/`SUBE_USOS_2026_URL`. El loader
+    lee 2024+2025+2026 y conserva **24 meses** (para comparaciones interanuales); el
+    gráfico y el total de la caja usan siempre los últimos 12.
 - URL de descarga (fallback):
   - https://cdn.buenosaires.gob.ar/datosabiertos/datasets/transporte-y-obras-publicas/colectivos-recorridos/recorrido-colectivos.geojson
   - https://cdn.buenosaires.gob.ar/datosabiertos/datasets/transporte-y-obras-publicas/colectivos-paradas/paradas-de-colectivo.geojson
+  - https://archivos-datos.transporte.gob.ar/upload/Dat_Ab_Usos/dat-ab-usos-2024.csv (usos SUBE 2024)
   - https://archivos-datos.transporte.gob.ar/upload/Dat_Ab_Usos/dat-ab-usos-2025.csv (usos SUBE 2025)
   - https://archivos-datos.transporte.gob.ar/upload/Dat_Ab_Usos/dat-ab-usos-2026.csv (usos SUBE 2026)
 
@@ -62,13 +65,16 @@ Gobierno de la Ciudad (BA Data).
 - Los datos viven en la carpeta **`data/`** (local, NO versionada en git, está en `.gitignore`).
   - `data/paradas-de-colectivo.geojson`
   - `data/recorrido-colectivos.geojson`
-  - `data/dat-ab-usos-2025.csv` y `data/dat-ab-usos-2026.csv`
+  - `data/dat-ab-usos-2024.csv`, `data/dat-ab-usos-2025.csv` y `data/dat-ab-usos-2026.csv`
 - `ensure_local_data()` crea `data/` y, si falta algún archivo, lo descarga de BA Data.
 - `load_geojson(path, url)` lee el archivo local; si no existe, descarga.
 - `load_sube_transactions()` lee los CSV de usos diarios (`AMBA=SI` + colectivo +
-  líneas CABA por patrón de código), los agrega a **últimos 12 meses** y devuelve
-  formato largo `(linea, fecha, transacciones)`. Se descarta el mes en curso si
-  está incompleto (último día < fin de mes). La línea se normaliza con `zfill(3)`.
+  líneas CABA por patrón de código), los agrega a **24 meses** (necesario para el
+  comparativo interanual) y devuelve formato largo `(linea, fecha, transacciones)`.
+  Se descarta el mes en curso si está incompleto (último día < fin de mes). La línea
+  se normaliza con `zfill(3)`. El gráfico y el total/promedio de la caja usan siempre
+  el último año (`tail(12)`); la caja SUBE muestra pills interanuales (últimos 12 vs
+  los 12 previos) e intermensuales (último mes vs el anterior).
 - `_route_distance_m(route_row)` suma distancias haversine punto a punto sobre las
   coordenadas del recorrido (devuelve metros). La distancia por línea (km) se resume
   en el caption.
