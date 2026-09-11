@@ -9,19 +9,32 @@ Gobierno de la Ciudad (BA Data).
 ## Estado actual
 
 - `app.py` es la única fuente de la app. Hay un selector de **línea de colectivo**
-  (dropdown con 137 líneas + opción "Todas las líneas").
+  (dropdown con 137 líneas + opción "Todas las líneas") y filtros de recorrido/sentido.
 - Al seleccionar una línea: dibuja los **recorridos** (PolyLines coloreados por
-  sentido: ida #1a73e8, vuelta #e8710a), muestra las **paradas** como CircleMarker
-  con popup (dirección, barrio, comuna) y ajusta el zoom a los límites de la línea.
-- En "Todas las líneas": dibuja los 1104 recorridos, cada línea con un color de una
-  paleta (10 colores cíclicos, `color_for_line()`).
-- Al seleccionar una línea: además del mapa muestra un **gráfico de línea** con el
-  evolutivo mensual de **transacciones SUBE (usos)** por línea para todo el **AMBA**
-  (fuente: dataset nacional "Cantidad de transacciones SUBE (usos) por fecha" de la
-  Secretaría de Transporte) y el caption informa la **distancia del recorrido en km**
-  (suma de distancias haversine punto a punto).
-- El gráfico cubre los últimos 12 meses de usos diarios agregados por mes; se
-  descartan las líneas sin datos y el mes en curso si está incompleto.
+  librea), muestra las **paradas** como CircleMarker con popup (dirección, barrio,
+  comuna) y ajusta el zoom a los límites de la línea.
+- En "Todas las líneas": dibuja los 1104 recorridos con **geometrías simplificadas**
+  (`coords_simple`, decimación a ~30 m) para abaratar el render; opcionalmente
+  superpone un **choropleth de demanda estimada por comuna** (`comunas.geojson` de
+  BA Data): reparte los usos AMBA de cada línea entre sus paradas de CABA
+  proporcional al nº de paradas por comuna.
+- KPIs por línea (reemplazan a las viejas cajas de distancias Euclidiana/Manhattan):
+  **longitud del recorrido** (precomputada como `longitud_m` en `build_routes_table`),
+  **usos por día** (promedio del último mes completo) y **usos por km anual**
+  (productividad = total 12 meses / km ida+vuelta). La caja SUBE conserva el
+  promedio mensual, el total de 12 meses y 3 pills: vs año anterior, vs mes anterior
+  y **vs mismo mes del año anterior**.
+- **Benchmark de demanda**: dropdown para comparar la evolución contra el **Total
+  AMBA** o una de las 20 líneas de mayor uso. El gráfico pasa a **base 100**
+  (primer mes = 100) para comparar ritmos de crecimiento entre magnitudes distintas.
+- **Vista "Tipo de día"**: barra con el promedio de usos diarios de la línea por
+  `Día hábil / Sábado / Domingo` (últimos 12 meses completos), usando el agregado
+  diario.
+- **Cobertura RE-NABAP**: con el checkbox de barrios populares activo se cuentan los
+  barrios cuyo centroide queda a ≤300 m del recorrido (familias y ~personas = ×4) y
+  se marcan en el mapa.
+- El gráfico y las cajas usan los últimos 12 meses; se descartan las líneas sin
+  datos y el mes en curso si está incompleto.
 
 ## Fuentes de datos (BA Data, licencia CC-BY-2.5-AR)
 
@@ -34,6 +47,9 @@ Gobierno de la Ciudad (BA Data).
   - Propiedades: `DIRECCION`, `BARRIO`, `COMUNA` y campos `L1`..`L6` (líneas que
     pasan por esa parada, string o null). Hay un valor corrupto `'V'` en algún campo
     L* que se descarta (solo se aceptan valores `isdigit()`).
+- **Comunas**: `Comunas` (GeoJSON `comunas.geojson`, ~0,6 MB, 15 features con propiedad
+  `comuna` 1..15). Usado para el choropleth de demanda por comuna. Ojo: el archivo
+  trae **BOM**, por eso `load_geojson` lee con `utf-8-sig`.
 - **Transacciones SUBE**: Secretaría de Transporte (datos.transporte.gob.ar) →
   "SUBE - Cantidad de transacciones (usos) por fecha" (CSV diario por línea,
   `dat-ab-usos-2025.csv` y `dat-ab-usos-2026.csv`, ~65 MB y ~47 MB).
@@ -56,6 +72,7 @@ Gobierno de la Ciudad (BA Data).
 - URL de descarga (fallback):
   - https://cdn.buenosaires.gob.ar/datosabiertos/datasets/transporte-y-obras-publicas/colectivos-recorridos/recorrido-colectivos.geojson
   - https://cdn.buenosaires.gob.ar/datosabiertos/datasets/transporte-y-obras-publicas/colectivos-paradas/paradas-de-colectivo.geojson
+  - https://cdn.buenosaires.gob.ar/datosabiertos/datasets/innovacion-transformacion-digital/comunas/comunas.geojson
   - https://archivos-datos.transporte.gob.ar/upload/Dat_Ab_Usos/dat-ab-usos-2024.csv (usos SUBE 2024)
   - https://archivos-datos.transporte.gob.ar/upload/Dat_Ab_Usos/dat-ab-usos-2025.csv (usos SUBE 2025)
   - https://archivos-datos.transporte.gob.ar/upload/Dat_Ab_Usos/dat-ab-usos-2026.csv (usos SUBE 2026)
@@ -63,21 +80,31 @@ Gobierno de la Ciudad (BA Data).
 ## Arquitectura de datos (importante)
 
 - Los datos viven en la carpeta **`data/`** (local, NO versionada en git, está en `.gitignore`).
-  - `data/paradas-de-colectivo.geojson`
-  - `data/recorrido-colectivos.geojson`
+  - `data/paradas-de-colectivo.geojson`, `data/recorrido-colectivos.geojson`, `data/comunas.geojson`
   - `data/dat-ab-usos-2024.csv`, `data/dat-ab-usos-2025.csv` y `data/dat-ab-usos-2026.csv`
+  - `data/sube_usos_mensuales.csv` y `data/sube_usos_diarios.csv` (**agregados derivados**,
+    se regeneran solos; ~4 MB en total vs ~165 MB de los CSVs originales)
 - `ensure_local_data()` crea `data/` y, si falta algún archivo, lo descarga de BA Data.
-- `load_geojson(path, url)` lee el archivo local; si no existe, descarga.
-- `load_sube_transactions()` lee los CSV de usos diarios (`AMBA=SI` + colectivo +
-  líneas CABA por patrón de código), los agrega a **24 meses** (necesario para el
-  comparativo interanual) y devuelve formato largo `(linea, fecha, transacciones)`.
-  Se descarta el mes en curso si está incompleto (último día < fin de mes). La línea
-  se normaliza con `zfill(3)`. El gráfico y el total/promedio de la caja usan siempre
-  el último año (`tail(12)`); la caja SUBE muestra pills interanuales (últimos 12 vs
-  los 12 previos) e intermensuales (último mes vs el anterior).
-- `_route_distance_m(route_row)` suma distancias haversine punto a punto sobre las
-  coordenadas del recorrido (devuelve metros). La distancia por línea (km) se resume
-  en el caption.
+- `load_geojson(path, url)` lee el archivo local con `utf-8-sig` (tolera BOM, ej. comunas);
+  si no existe, descarga.
+- **Agregados SUBE**: `_build_sube_aggregates()` lee los CSV diarios
+  (`AMBA=SI` + colectivo + líneas CABA por patrón de código) una sola vez y escribe
+  `sube_usos_mensuales.csv` (24 meses, formato largo `linea, fecha, transacciones`) y
+  `sube_usos_diarios.csv` (últimos 12 meses `linea, fecha, transacciones, tipo_dia`
+  con `Día hábil/Sábado/Domingo`). La frescura se resuelve con
+  `_sube_aggregates_fresh()`: compara el `built_after` del sidecar
+  `sube_agregados_meta.json` contra el `mtime` máximo de los CSVs fuente. Si cambian
+  los fuentes (año nuevo, mes nuevo) se regeneran. Se descarta el mes en curso si está
+  incompleto (último día < fin de mes). La línea se normaliza con `zfill(3)`.
+- `load_sube_transactions(token)` y `load_sube_daily(token)` leen los agregados (rápido)
+  y se cachean con `@st.cache_data`; el `token = _sube_source_token()` (mtimes de fuentes)
+  invalida la caché cuando cambian los datos. El gráfico/boxes usan `tail(12)`; las pills
+  interanuales comparan los últimos 12 vs los 12 previos y el último mes vs el mismo mes
+  del año anterior.
+- `build_routes_table` precomputa por recorrido: **`longitud_m`** (haversine punto a
+  punto) y **`coords_simple`** (decimado ~30 m, usado solo en "Todas las líneas"). Así
+  los km del caption y el mapa agregado NO recomputan por rerun (antes se sumaba con
+  numpy por punto en cada rerun).
 - Todo el procesamiento está cacheado con `@st.cache_data` (tablas de stops y routes
   en pandas), para no reparsear los 15 MB en cada rerun.
 - `data/` está en `.gitignore`. Para regenerar testear offline borrar archivos localmente y la app descarga sola.
@@ -102,6 +129,23 @@ Gobierno de la Ciudad (BA Data).
   y se deduplica por `(linea, lat, lon)`.
 - El mapa se reinicia en cada selector de línea (sin `key` en st_folium) para que
   se remonte con la línea nueva.
+- **Benchmark base 100**: comparar una línea (~10⁵-10⁶ usos/mes) contra el Total AMBA
+  (~10⁷-10⁸) en ejes absolutos aplasta la serie chica. Se indexa cada serie a 100 en
+  el primer mes (`_index_series`) y se superponen dos `mark_line` con `alt.layer`.
+- **Cobertura y score de proximidad**: el filtro espacial por radio
+  (`stops_near_route`, haversine bacheada) es genérico: se reusa tanto para las
+  paradas OSM del conurbano (≤150 m) como para los centroides RE-NABAP (≤300 m).
+  Los centroides de barrio se aproximan como el promedio de vértices de los polígonos.
+- **Choropleth por comuna**: es una **estimación** (reparto proporcional al nº de
+  paradas de CABA de cada línea), no demanda real por parada; el expander "Sobre los
+  datos" lo aclara. El campo `COMUNA` de paradas trae un valor corrupto `76` que se
+  descarta filtrando a 1..15. `folium.Choropleth` recibe `threshold_scale` con
+  cuantiles para acotar la leyenda.
+- **Agregados en disco**: los CSVs originales (~165 MB) solo se leen la primera vez
+  (o cuando cambian); después se usan `sube_usos_mensuales.csv` (~160 KB) y
+  `sube_usos_diarios.csv` (~4 MB). La caché de `st.cache_data` se invalida con un
+  token derivado de los `mtime` de los fuentes (`_sube_source_token`), porque
+  `st.cache_data` no observa archivos por sí solo.
 
 ## Cómo correr la app
 
@@ -140,7 +184,9 @@ streamlit run app.py
 
 ## Pendientes / ideas
 
-- Commit + push de la migración a la fuente nacional de usos SUBE (AMBA completo).
+- Commit + push de las fases de mejora: KPIs de transporte (usos/día, usos/km),
+  benchmark base 100, vista tipo de día, cobertura RE-NABAP, choropleth por comuna
+  y agregados SUBE en disco.
 - Eventualmente: posiciones en tiempo real de colectivos (API de transporte, pero
   BA Data indica que las APIs/GTFS están suspendidos en revisión).
 

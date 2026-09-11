@@ -13,6 +13,7 @@ from streamlit_folium import st_folium
 
 STOPS_URL = "https://cdn.buenosaires.gob.ar/datosabiertos/datasets/transporte-y-obras-publicas/colectivos-paradas/paradas-de-colectivo.geojson"
 ROUTES_URL = "https://cdn.buenosaires.gob.ar/datosabiertos/datasets/transporte-y-obras-publicas/colectivos-recorridos/recorrido-colectivos.geojson"
+COMUNAS_URL = "https://cdn.buenosaires.gob.ar/datosabiertos/datasets/innovacion-transformacion-digital/comunas/comunas.geojson"
 SUBE_USOS_2024_URL = "https://archivos-datos.transporte.gob.ar/upload/Dat_Ab_Usos/dat-ab-usos-2024.csv"
 SUBE_USOS_2025_URL = "https://archivos-datos.transporte.gob.ar/upload/Dat_Ab_Usos/dat-ab-usos-2025.csv"
 SUBE_USOS_2026_URL = "https://archivos-datos.transporte.gob.ar/upload/Dat_Ab_Usos/dat-ab-usos-2026.csv"
@@ -24,15 +25,21 @@ OSM_AMBA_BBOX = "(-35.02,-58.80,-34.40,-58.05)"
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 STOPS_FILE = os.path.join(DATA_DIR, "paradas-de-colectivo.geojson")
 ROUTES_FILE = os.path.join(DATA_DIR, "recorrido-colectivos.geojson")
+COMUNAS_FILE = os.path.join(DATA_DIR, "comunas.geojson")
 RENABAP_AMBA_FILE = os.path.join(DATA_DIR, "renabap_amba.geojson")
 OSM_STOPS_FILE = os.path.join(DATA_DIR, "paradas_amba_osm.geojson")
 SUBE_USOS_2024_FILE = os.path.join(DATA_DIR, "dat-ab-usos-2024.csv")
 SUBE_USOS_2025_FILE = os.path.join(DATA_DIR, "dat-ab-usos-2025.csv")
 SUBE_USOS_2026_FILE = os.path.join(DATA_DIR, "dat-ab-usos-2026.csv")
 
+SUBE_MONTHLY_FILE = os.path.join(DATA_DIR, "sube_usos_mensuales.csv")
+SUBE_DAILY_FILE = os.path.join(DATA_DIR, "sube_usos_diarios.csv")
+SUBE_AGG_META_FILE = os.path.join(DATA_DIR, "sube_agregados_meta.json")
+
 DATA_SOURCES = [
     (STOPS_FILE, STOPS_URL),
     (ROUTES_FILE, ROUTES_URL),
+    (COMUNAS_FILE, COMUNAS_URL),
 ]
 
 RENABAP_AMBA_DEPTS = {
@@ -46,6 +53,7 @@ RENABAP_AMBA_DEPTS = {
 }
 
 RENABAP_COLOR = "#d62728"
+RENABAP_RADIUS_M = 300
 
 CABA_BOX = {
     "lat_min": -34.705, "lat_max": -34.520,
@@ -53,8 +61,14 @@ CABA_BOX = {
 }
 
 OSM_STOP_RADIUS_M = 150
+ALL_LINES_SIMPLE_STEP_M = 30.0
+CHOROPLETH_BINS = 5
 
 SEL_LINEA = "— Seleccioná una línea —"
+VISTA_MENSUAL = "Mensual"
+VISTA_DIA = "Tipo de día (hábiles vs. finde)"
+BENCH_NINGUNO = "Sin comparación"
+BENCH_AMBA = "Total AMBA"
 
 BASE_COLORS = {
     "azul": "#1a73e8",
@@ -209,7 +223,7 @@ LINE_COLORS = {
 @st.cache_data(show_spinner=False)
 def load_geojson(path: str, url: str) -> dict:
     if os.path.exists(path):
-        with open(path, encoding="utf-8") as f:
+        with open(path, encoding="utf-8-sig") as f:
             return json.load(f)
     resp = requests.get(url, timeout=60)
     resp.raise_for_status()
@@ -227,8 +241,6 @@ def ensure_local_data() -> list:
             with open(path, "wb") as f:
                 f.write(resp.content)
             messages.append(f"Descargado {os.path.basename(path)}")
-        else:
-            messages.append(f"Usando datos locales: {os.path.basename(path)}")
 
     for path, url in (
         (SUBE_USOS_2024_FILE, SUBE_USOS_2024_URL),
@@ -241,8 +253,6 @@ def ensure_local_data() -> list:
             with open(path, "wb") as f:
                 f.write(resp.content)
             messages.append(f"Descargado {os.path.basename(path)}")
-        else:
-            messages.append(f"Usos SUBE diarios (local): {os.path.basename(path)}")
 
     if not os.path.exists(RENABAP_AMBA_FILE):
         messages.append("Descargando RE-NABAP nacional y filtrando AMBA...")
@@ -253,8 +263,6 @@ def ensure_local_data() -> list:
         with open(RENABAP_AMBA_FILE, "w", encoding="utf-8") as f:
             json.dump(amba, f, ensure_ascii=False)
         messages.append(f"Guardado RE-NABAP AMBA: {len(amba['features'])} barrios")
-    else:
-        messages.append("Usando datos locales: renabap_amba.geojson")
 
     if not os.path.exists(OSM_STOPS_FILE):
         messages.append("Descargando paradas AMBA desde OpenStreetMap (Overpass)...")
@@ -284,8 +292,6 @@ def ensure_local_data() -> list:
         with open(OSM_STOPS_FILE, "w", encoding="utf-8") as f:
             json.dump(fc, f, ensure_ascii=False)
         messages.append(f"Guardadas paradas AMBA desde OSM: {len(features)}")
-    else:
-        messages.append("Usando datos locales: paradas_amba_osm.geojson")
 
     return messages
 
@@ -342,28 +348,18 @@ def build_stops_table(fc: dict) -> pd.DataFrame:
     return df.drop_duplicates(subset=["linea", "lat", "lon"])
 
 
-@st.cache_data(show_spinner=False)
-def build_routes_table(fc: dict) -> pd.DataFrame:
-    rows = []
-    for feature in fc["features"]:
-        props = feature["properties"]
-        rows.append(
-            {
-                "linea": str(props["linea"]).zfill(3),
-                "recorrido": props.get("recorrido"),
-                "sentido": props.get("sentido"),
-                "modalidad": props.get("modalidad"),
-                "desde": props.get("desde"),
-                "hasta": props.get("hasta"),
-                "coords": feature["geometry"]["coordinates"],
-            }
-        )
-    return pd.DataFrame(rows)
+def _haversine_np(lat1, lon1, lat2, lon2):
+    r_earth = 6_371_000.0
+    lat1, lon1, lat2, lon2 = map(np.radians, [lat1, lon1, lat2, lon2])
+    dlat = lat2 - lat1
+    dlon = lon2 - lon1
+    a = np.sin(dlat / 2) ** 2 + np.cos(lat1) * np.cos(lat2) * np.sin(dlon / 2) ** 2
+    return r_earth * 2 * np.arcsin(np.sqrt(a))
 
 
-def _route_distance_m(route_row) -> float:
+def _route_length_m(coords) -> float:
     total = 0.0
-    for segment in route_row["coords"]:
+    for segment in coords:
         for i in range(1, len(segment)):
             lon1, lat1 = segment[i - 1]
             lon2, lat2 = segment[i]
@@ -379,22 +375,45 @@ def _dx_dy_m(lat1, lon1, lat2, lon2):
     return dx, dy
 
 
-def _euclidean_route_distance_m(route_row) -> float:
-    total = 0.0
-    for segment in route_row["coords"]:
-        for i in range(1, len(segment)):
-            dx, dy = _dx_dy_m(*segment[i - 1], *segment[i])
-            total += np.hypot(dx, dy)
-    return float(total)
+def _simplify_route_coords(coords, min_step_m=ALL_LINES_SIMPLE_STEP_M):
+    simplified = []
+    for segment in coords:
+        if not segment:
+            continue
+        pts = [(float(c[1]), float(c[0])) for c in segment]
+        out = [pts[0]]
+        last = pts[0]
+        for p in pts[1:]:
+            dx, dy = _dx_dy_m(last[0], last[1], p[0], p[1])
+            if np.hypot(dx, dy) >= min_step_m:
+                out.append(p)
+                last = p
+        if out[-1] != pts[-1]:
+            out.append(pts[-1])
+        simplified.append([(lon, lat) for lat, lon in out])
+    return simplified
 
 
-def _manhattan_route_distance_m(route_row) -> float:
-    total = 0.0
-    for segment in route_row["coords"]:
-        for i in range(1, len(segment)):
-            dx, dy = _dx_dy_m(*segment[i - 1], *segment[i])
-            total += abs(dx) + abs(dy)
-    return float(total)
+@st.cache_data(show_spinner=False)
+def build_routes_table(fc: dict) -> pd.DataFrame:
+    rows = []
+    for feature in fc["features"]:
+        props = feature["properties"]
+        coords = feature["geometry"]["coordinates"]
+        rows.append(
+            {
+                "linea": str(props["linea"]).zfill(3),
+                "recorrido": props.get("recorrido"),
+                "sentido": props.get("sentido"),
+                "modalidad": props.get("modalidad"),
+                "desde": props.get("desde"),
+                "hasta": props.get("hasta"),
+                "coords": coords,
+                "coords_simple": _simplify_route_coords(coords),
+                "longitud_m": _route_length_m(coords),
+            }
+        )
+    return pd.DataFrame(rows)
 
 
 def _normalize_sube_linea(code) -> str | None:
@@ -417,11 +436,13 @@ def _is_caba_sube_row(code, jurisdiccion) -> bool:
     return jur.upper() in ("NACIONAL", "C.A.B.A")
 
 
+SUBE_SOURCE_FILES = [SUBE_USOS_2024_FILE, SUBE_USOS_2025_FILE, SUBE_USOS_2026_FILE]
+
+
 @st.cache_data(show_spinner=False)
-def load_sube_transactions() -> pd.DataFrame:
-    monthly = []
-    daymap = []
-    for path in (SUBE_USOS_2024_FILE, SUBE_USOS_2025_FILE, SUBE_USOS_2026_FILE):
+def _read_sube_daily_all() -> pd.DataFrame:
+    frames = []
+    for path in SUBE_SOURCE_FILES:
         if not os.path.exists(path):
             continue
         df = pd.read_csv(
@@ -442,21 +463,98 @@ def load_sube_transactions() -> pd.DataFrame:
         df = df[ok & (df["AMBA"] == "SI") & (df["TIP"] == "COLECTIVO")].copy()
         df["linea"] = df["LINEA"].apply(_normalize_sube_linea)
         df = df.dropna(subset=["linea"])
-        df["fecha"] = pd.to_datetime(df["DIA_TRANSPORTE"]).dt.to_period("M").dt.to_timestamp()
-        monthly.append(df.groupby(["linea", "fecha"], as_index=False)["CANTIDAD"].sum())
-        daymap.append(df[["fecha", "DIA_TRANSPORTE"]])
-    if not monthly:
+        df["fecha"] = pd.to_datetime(df["DIA_TRANSPORTE"])
+        frames.append(df[["linea", "fecha", "CANTIDAD"]])
+    if not frames:
+        return pd.DataFrame(columns=["linea", "fecha", "CANTIDAD"])
+    return pd.concat(frames, ignore_index=True)
+
+
+def _sube_source_token() -> str:
+    parts = []
+    for path in SUBE_SOURCE_FILES:
+        parts.append("1" if os.path.exists(path) else "0")
+        if os.path.exists(path):
+            parts.append(f"{os.path.getmtime(path):.0f}")
+    return "|".join(parts)
+
+
+def _sube_aggregates_fresh() -> bool:
+    if not (
+        os.path.exists(SUBE_MONTHLY_FILE)
+        and os.path.exists(SUBE_DAILY_FILE)
+        and os.path.exists(SUBE_AGG_META_FILE)
+    ):
+        return False
+    try:
+        with open(SUBE_AGG_META_FILE, encoding="utf-8") as f:
+            meta = json.load(f)
+    except (ValueError, OSError):
+        return False
+    src = list(meta.get("fuentes", []))
+    src_files = [os.path.join(DATA_DIR, s) for s in src]
+    if any(not os.path.exists(p) for p in src_files):
+        return False
+    src_max = max(os.path.getmtime(p) for p in src_files)
+    return src_max <= meta.get("built_after", 0)
+
+
+def _build_sube_aggregates() -> pd.DataFrame:
+    df = _read_sube_daily_all()
+    if df.empty:
         return pd.DataFrame(columns=["linea", "fecha", "transacciones"])
-    result = pd.concat(monthly).rename(columns={"CANTIDAD": "transacciones"})
-    ultimo_dia = (
-        pd.concat(daymap).groupby("fecha")["DIA_TRANSPORTE"].max().sort_index()
-    )
+
+    df["fecha_m"] = df["fecha"].dt.to_period("M").dt.to_timestamp()
+
+    ultimo_dia = df.groupby("fecha_m")["fecha"].max().sort_index()
     last = ultimo_dia.index.max()
     if pd.to_datetime(ultimo_dia[last]).day < last.days_in_month:
-        result = result[result["fecha"] < last]
-    result = result.sort_values(["linea", "fecha"])
-    cutoff = result["fecha"].max() - pd.DateOffset(months=23)
-    return result[result["fecha"] >= cutoff].reset_index(drop=True)
+        df = df[df["fecha_m"] < last]
+
+    mensual = (
+        df.groupby(["linea", "fecha_m"], as_index=False)["CANTIDAD"].sum()
+        .rename(columns={"fecha_m": "fecha", "CANTIDAD": "transacciones"})
+    )
+    mensual = mensual.sort_values(["linea", "fecha"])
+    cutoff = mensual["fecha"].max() - pd.DateOffset(months=23)
+    mensual = mensual[mensual["fecha"] >= cutoff].reset_index(drop=True)
+
+    daily = df[["linea", "fecha", "CANTIDAD"]].copy()
+    daily_cut = mensual["fecha"].max() - pd.DateOffset(months=11)
+    daily = daily[daily["fecha"] >= daily_cut].copy()
+    daily["tipo_dia"] = daily["fecha"].dt.dayofweek.map(
+        {0: "Día hábil", 1: "Día hábil", 2: "Día hábil", 3: "Día hábil", 4: "Día hábil",
+         5: "Sábado", 6: "Domingo"}
+    )
+    daily = daily.rename(columns={"CANTIDAD": "transacciones"})[["linea", "fecha", "transacciones", "tipo_dia"]]
+
+    mensual.to_csv(SUBE_MONTHLY_FILE, index=False)
+    daily.to_csv(SUBE_DAILY_FILE, index=False)
+    meta = {
+        "fuentes": [os.path.basename(p) for p in SUBE_SOURCE_FILES],
+        "built_after": max(os.path.getmtime(p) for p in SUBE_SOURCE_FILES if os.path.exists(p)),
+    }
+    with open(SUBE_AGG_META_FILE, "w", encoding="utf-8") as f:
+        json.dump(meta, f)
+    return mensual
+
+
+@st.cache_data(show_spinner=False)
+def load_sube_transactions(token: str) -> pd.DataFrame:
+    if _sube_aggregates_fresh():
+        df = pd.read_csv(SUBE_MONTHLY_FILE, dtype={"linea": str})
+        df["fecha"] = pd.to_datetime(df["fecha"]).dt.to_period("M").dt.to_timestamp()
+        return df[["linea", "fecha", "transacciones"]].sort_values(["linea", "fecha"]).reset_index(drop=True)
+    return _build_sube_aggregates()
+
+
+@st.cache_data(show_spinner=False)
+def load_sube_daily(token: str) -> pd.DataFrame:
+    if not _sube_aggregates_fresh():
+        _build_sube_aggregates()
+    df = pd.read_csv(SUBE_DAILY_FILE, dtype={"linea": str})
+    df["fecha"] = pd.to_datetime(df["fecha"])
+    return df.sort_values(["linea", "fecha"]).reset_index(drop=True)
 
 
 def _livery_colors(description: str) -> list:
@@ -481,26 +579,20 @@ def route_colors(description: str | None):
     return color, band
 
 
-def draw_route(m, route_row, color, band=None):
-    for segment in route_row["coords"]:
+def draw_route(m, coords, color, band=None, weight=4, opacity=0.8, tooltip=None):
+    for segment in coords:
         locations = [(lat, lon) for lon, lat in segment]
         if band:
             folium.PolyLine(
                 locations=locations,
                 color=band,
-                weight=6,
+                weight=weight + 2,
                 opacity=0.9,
             ).add_to(m)
-        folium.PolyLine(
-            locations=locations,
-            color=color,
-            weight=4,
-            opacity=0.8,
-            tooltip=(
-                f"Línea {route_row['linea']} - "
-                f"Recorrido {route_row['recorrido']} - {route_row['sentido']}"
-            ),
-        ).add_to(m)
+        kw = {"color": color, "weight": weight, "opacity": opacity}
+        if tooltip:
+            kw["tooltip"] = tooltip
+        folium.PolyLine(locations, **kw).add_to(m)
 
 
 @st.cache_data(show_spinner=False)
@@ -527,26 +619,17 @@ def load_osm_stops() -> pd.DataFrame:
     return build_osm_stops_table(fc)
 
 
-def _haversine_np(lat1, lon1, lat2, lon2):
-    r_earth = 6_371_000.0
-    lat1, lon1, lat2, lon2 = map(np.radians, [lat1, lon1, lat2, lon2])
-    dlat = lat2 - lat1
-    dlon = lon2 - lon1
-    a = np.sin(dlat / 2) ** 2 + np.cos(lat1) * np.cos(lat2) * np.sin(dlon / 2) ** 2
-    return r_earth * 2 * np.arcsin(np.sqrt(a))
-
-
-def osm_stops_for_line(osm_df: pd.DataFrame, lats, lons, radius_m=OSM_STOP_RADIUS_M) -> pd.DataFrame:
-    if osm_df.empty or not lats:
-        return osm_df.iloc[0:0]
+def stops_near_route(stops_df: pd.DataFrame, lats, lons, radius_m=OSM_STOP_RADIUS_M) -> pd.DataFrame:
+    if stops_df.empty or not lats:
+        return stops_df.iloc[0:0]
     lat_arr = np.asarray(lats, dtype=float)
     lon_arr = np.asarray(lons, dtype=float)
     pad = 0.012
-    cand = osm_df[
-        (osm_df["lat"] >= lat_arr.min() - pad)
-        & (osm_df["lat"] <= lat_arr.max() + pad)
-        & (osm_df["lon"] >= lon_arr.min() - pad)
-        & (osm_df["lon"] <= lon_arr.max() + pad)
+    cand = stops_df[
+        (stops_df["lat"] >= lat_arr.min() - pad)
+        & (stops_df["lat"] <= lat_arr.max() + pad)
+        & (stops_df["lon"] >= lon_arr.min() - pad)
+        & (stops_df["lon"] <= lon_arr.max() + pad)
     ]
     if cand.empty:
         return cand
@@ -580,6 +663,73 @@ def draw_osm_stops(m, stops_df):
             fill_opacity=0.9,
             tooltip=f"Parada AMBA: {stop_row['name'] or 's/d'}",
         ).add_to(m)
+
+
+@st.cache_data(show_spinner=False)
+def load_renabap_centroids() -> pd.DataFrame:
+    fc = load_geojson(RENABAP_AMBA_FILE, RENABAP_AMBA_URL)
+    rows = []
+    for feature in fc["features"]:
+        props = feature["properties"]
+        geom = feature["geometry"]
+        if geom["type"] == "Polygon":
+            polys = [geom["coordinates"]]
+        else:
+            polys = geom["coordinates"]
+        xs, ys = [], []
+        for poly in polys:
+            for ring in poly:
+                for lon, lat in ring:
+                    xs.append(lon)
+                    ys.append(lat)
+        if not xs:
+            continue
+        rows.append(
+            {
+                "barrio": props.get("nombre_barrio"),
+                "partido": props.get("departamento"),
+                "lat": sum(ys) / len(ys),
+                "lon": sum(xs) / len(xs),
+                "familias": props.get("familias_aproximadas"),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+@st.cache_data(show_spinner=False)
+def load_comunas() -> dict:
+    return load_geojson(COMUNAS_FILE, COMUNAS_URL)
+
+
+@st.cache_data(show_spinner=False)
+def comuna_demand_table(stops_df: pd.DataFrame, sube: pd.DataFrame) -> pd.DataFrame:
+    stops_caba = stops_df.copy()
+    stops_caba["comuna"] = pd.to_numeric(stops_caba["comuna"], errors="coerce")
+    stops_caba = stops_caba[stops_caba["comuna"].between(1, 15)].dropna(subset=["comuna"])
+    stops_caba["comuna"] = stops_caba["comuna"].astype(int)
+    if stops_caba.empty or sube.empty:
+        return pd.DataFrame(columns=["comuna", "usos", "paradas"])
+
+    counts = stops_caba.groupby(["linea", "comuna"], as_index=False).size()
+    counts = counts.rename(columns={"size": "paradas"})
+    per_line_total = counts.groupby("linea", as_index=False)["paradas"].sum().rename(
+        columns={"paradas": "total_paradas_caba"}
+    )
+    counts = counts.merge(per_line_total, on="linea")
+    counts["weight"] = counts["paradas"] / counts["total_paradas_caba"]
+
+    sube12 = sube[sube["fecha"] >= sube["fecha"].max() - pd.DateOffset(months=11)]
+    line_tot = sube12.groupby("linea", as_index=False)["transacciones"].sum().rename(
+        columns={"transacciones": "usos_12m"}
+    )
+    counts = counts.merge(line_tot, on="linea", how="inner")
+    counts["usos"] = counts["weight"] * counts["usos_12m"]
+
+    return (
+        counts.groupby("comuna", as_index=False)["usos"].sum()
+        .sort_values("comuna")
+        .reset_index(drop=True)
+    )
 
 
 def _fmt(n, suffix="", default="s/d"):
@@ -740,6 +890,13 @@ def draw_renabap(m, fc, color=RENABAP_COLOR):
     layer.add_to(m)
 
 
+def _index_series(serie: pd.DataFrame) -> pd.DataFrame:
+    out = serie.copy()
+    base = out["transacciones"].iloc[0]
+    out["idx"] = 100.0 * out["transacciones"] / base if base else 0.0
+    return out
+
+
 st.set_page_config(
     page_title="Panel de Transporte CABA",
     page_icon="🚌",
@@ -766,6 +923,11 @@ route_lineas = set(routes_df["linea"])
 stop_lineas = set(stops_df["linea"])
 lineas = sorted(route_lineas | stop_lineas, key=int)
 
+sube_token = _sube_source_token()
+sube_all = pd.DataFrame()
+if os.path.exists(SUBE_MONTHLY_FILE) or any(os.path.exists(p) for p in SUBE_SOURCE_FILES):
+    sube_all = load_sube_transactions(sube_token)
+
 col_sel, col_info = st.columns([1, 3])
 
 with col_sel:
@@ -779,6 +941,10 @@ with col_sel:
     recorrido = "Todos"
     sentido = "Ambos"
     show_osm_stops = False
+    show_renabap = False
+    show_demanda_comuna = False
+    vista = VISTA_MENSUAL
+    benchmark = BENCH_NINGUNO
     if real_linea:
         line_recorridos = sorted(
             routes_df[routes_df["linea"] == linea]["recorrido"].dropna().unique(),
@@ -796,10 +962,25 @@ with col_sel:
             key="sentido_sel",
         )
         show_osm_stops = st.checkbox("Paradas de colectivo AMBA (OpenStreetMap)", value=False)
-    show_renabap = st.checkbox("Barrios populares RE-NABAP (AMBA)", value=False)
+        show_renabap = st.checkbox("Barrios populares RE-NABAP (AMBA) y cobertura", value=False)
+        if not sube_all.empty:
+            vista = st.selectbox(
+                "Vista de demanda",
+                [VISTA_MENSUAL, VISTA_DIA],
+                key="vista_sel",
+            )
+            if vista == VISTA_MENSUAL:
+                top_lines = (
+                    sube_all.groupby("linea")["transacciones"].sum()
+                    .sort_values(ascending=False).head(20)
+                )
+                bench_opts = [BENCH_NINGUNO, BENCH_AMBA] + [f"Línea {l}" for l in top_lines.index]
+                benchmark = st.selectbox("Comparar evolución con", bench_opts, key="bench_sel")
+    elif linea == "Todas las líneas":
+        show_demanda_comuna = st.checkbox("Demanda estimada por comuna (CABA)", value=False)
 
 if "last_linea" in st.session_state and st.session_state["last_linea"] != linea:
-    for key in ("recorrido_sel", "sentido_sel"):
+    for key in ("recorrido_sel", "sentido_sel", "vista_sel", "bench_sel"):
         st.session_state.pop(key, None)
 if real_linea:
     st.session_state["last_linea"] = linea
@@ -812,6 +993,7 @@ if real_linea:
         line_routes = line_routes[line_routes["sentido"] == sentido]
 
 osm_match = pd.DataFrame()
+ren_near = pd.DataFrame()
 if real_linea and show_osm_stops:
     with st.spinner("Filtrando paradas AMBA (OSM)..."):
         osm_stops_all = load_osm_stops()
@@ -820,20 +1002,22 @@ if real_linea and show_osm_stops:
             for segment in route_row["coords"]:
                 lats.extend(float(c[1]) for c in segment)
                 lons.extend(float(c[0]) for c in segment)
-        osm_match = osm_stops_for_line(osm_stops_all, lats, lons)
+        osm_match = stops_near_route(osm_stops_all, lats, lons)
 
 line_sube = pd.DataFrame()
+line_sube_daily = pd.DataFrame()
 if real_linea:
-    line_sube = load_sube_transactions()
-    line_sube = line_sube[line_sube["linea"] == linea]
+    line_sube = sube_all[sube_all["linea"] == linea]
+    if vista == VISTA_DIA and not sube_all.empty:
+        line_sube_daily = load_sube_daily(sube_token)
+        line_sube_daily = line_sube_daily[line_sube_daily["linea"] == linea]
 
 with col_info:
     if real_linea:
-        total_km = sum(_route_distance_m(row) for _, row in line_routes.iterrows()) / 1000.0
-        euclid_km = sum(_euclidean_route_distance_m(row) for _, row in line_routes.iterrows()) / 1000.0
-        manhattan_km = sum(_manhattan_route_distance_m(row) for _, row in line_routes.iterrows()) / 1000.0
+        total_km = line_routes["longitud_m"].sum() / 1000.0
+        n_paradas = len(stops_df[stops_df["linea"] == linea])
         caption = (
-            f"{len(stops_df[stops_df['linea'] == linea])} paradas, "
+            f"{n_paradas} paradas, "
             f"{len(line_routes)} recorridos "
             f"(recorrido {recorrido}, {sentido})."
         )
@@ -841,92 +1025,173 @@ with col_info:
             caption += f" Paradas AMBA (OSM): {len(osm_match)}."
         st.caption(caption)
 
-        dist_col, tx_col = st.columns([2, 1])
-        with dist_col:
-            st.markdown(
-                _metric_box_html(
-                    f"Recorrido · Línea {linea}",
-                    f'{_fmt_dec(total_km)}<small>km</small>',
-                    '<span>Distancia por la ruta (gran círculo)</span>',
-                ),
-                unsafe_allow_html=True,
-            )
-            st.markdown(
-                _metric_box_html(
-                    "Distancia Euclidiana",
-                    f'{_fmt_dec(euclid_km)}<small>km</small>',
-                    '<span>Línea recta proyectada en el plano</span>',
-                ),
-                unsafe_allow_html=True,
-            )
-            st.markdown(
-                _metric_box_html(
-                    "Distancia Manhattan",
-                    f'{_fmt_dec(manhattan_km)}<small>km</small>',
-                    '<span>Camino en cuadrícula: |Δx| + |Δy|</span>',
-                ),
-                unsafe_allow_html=True,
-            )
-        with tx_col:
-            if line_sube.empty:
-                tx_html = _metric_box_html(
-                    f"Transacciones SUBE · Línea {linea}",
-                    "s/d",
-                )
-            else:
-                sube_12 = line_sube.tail(12)
-                prom_mensual = sube_12["transacciones"].mean()
-                total_anual = sube_12["transacciones"].sum()
-
-                delta_anual = None
-                if len(line_sube) >= 24:
-                    prev_total = line_sube.iloc[:-12]["transacciones"].sum()
-                    if prev_total:
-                        delta_anual = (total_anual - prev_total) / prev_total * 100.0
-
-                delta_mensual = None
-                if len(line_sube) >= 2:
-                    prev_month = line_sube["transacciones"].iloc[-2]
-                    if prev_month:
-                        last_month = line_sube["transacciones"].iloc[-1]
-                        delta_mensual = (last_month - prev_month) / prev_month * 100.0
-
-                badges = (
-                    f'{_delta_pill_html(delta_anual)}<span style="color:#8b95ab;font-size:13px;">vs año anterior</span> '
-                    f'{_delta_pill_html(delta_mensual)}<span style="color:#8b95ab;font-size:13px;">vs mes anterior</span>'
-                )
-                tx_html = _metric_box_html(
-                    f"Transacciones SUBE · Línea {linea}",
-                    f'{_fmt(prom_mensual)}<small>prom. mensual</small>',
-                    (
-                        f'<span>Total últimos 12 meses</span>'
-                        f'<span class="num">{_fmt(total_anual)}</span>'
+        if line_sube.empty:
+            k1, k2, k3 = st.columns(3)
+            with k1:
+                st.markdown(
+                    _metric_box_html(
+                        f"Recorrido · Línea {linea}",
+                        f'{_fmt_dec(total_km)}<small>km</small>',
+                        f'<span>{len(line_routes)} recorrido(s) · {n_paradas} paradas (CABA)</span>',
                     ),
-                    badges,
+                    unsafe_allow_html=True,
                 )
+        else:
+            sube_12 = line_sube.tail(12)
+            prom_mensual = sube_12["transacciones"].mean()
+            total_anual = sube_12["transacciones"].sum()
+            ult_mes = sube_12["fecha"].iloc[-1]
+            usos_dia = sube_12["transacciones"].iloc[-1] / ult_mes.days_in_month
+            usos_km = total_anual / total_km if total_km > 0 else float("nan")
+
+            delta_anual = None
+            if len(line_sube) >= 24:
+                prev_total = line_sube.iloc[:-12]["transacciones"].sum()
+                if prev_total:
+                    delta_anual = (total_anual - prev_total) / prev_total * 100.0
+
+            delta_mensual = None
+            if len(line_sube) >= 2:
+                prev_month = line_sube["transacciones"].iloc[-2]
+                if prev_month:
+                    last_month = line_sube["transacciones"].iloc[-1]
+                    delta_mensual = (last_month - prev_month) / prev_month * 100.0
+
+            delta_anual_mes = None
+            if len(line_sube) >= 13:
+                prev_year_rows = line_sube[line_sube["fecha"].dt.month == ult_mes.month]
+                prev_year_rows = prev_year_rows[prev_year_rows["fecha"].dt.year == ult_mes.year - 1]
+                if not prev_year_rows.empty and prev_year_rows["transacciones"].iloc[0]:
+                    delta_anual_mes = (
+                        (line_sube["transacciones"].iloc[-1] - prev_year_rows["transacciones"].iloc[0])
+                        / prev_year_rows["transacciones"].iloc[0] * 100.0
+                    )
+
+            k1, k2, k3 = st.columns(3)
+            with k1:
+                st.markdown(
+                    _metric_box_html(
+                        f"Recorrido · Línea {linea}",
+                        f'{_fmt_dec(total_km)}<small>km</small>',
+                        f'<span>Longitud ida + vuelta ({len(line_routes)} recorrido(s))</span>',
+                    ),
+                    unsafe_allow_html=True,
+                )
+            with k2:
+                st.markdown(
+                    _metric_box_html(
+                        "Usos por día",
+                        f'{_fmt(usos_dia)}<small>usos</small>',
+                        f'<span>Prom. de {_fmt(sube_12["transacciones"].iloc[-1])} usos en {ult_mes:%m/%Y}</span>',
+                    ),
+                    unsafe_allow_html=True,
+                )
+            with k3:
+                st.markdown(
+                    _metric_box_html(
+                        "Usos por km (anual)",
+                        f'{_fmt_dec(usos_km)}<small>usos/km</small>',
+                        f'<span>Total 12 meses <span class="num">{_fmt(total_anual)}</span></span>',
+                    ),
+                    unsafe_allow_html=True,
+                )
+
+            badges = (
+                f'{_delta_pill_html(delta_anual)}<span style="color:#8b95ab;font-size:13px;">vs año ant.</span> '
+                f'{_delta_pill_html(delta_mensual)}<span style="color:#8b95ab;font-size:13px;">vs mes ant.</span> '
+                f'{_delta_pill_html(delta_anual_mes)}<span style="color:#8b95ab;font-size:13px;">vs mismo mes año ant.</span>'
+            )
+            tx_html = _metric_box_html(
+                f"Transacciones SUBE · Línea {linea}",
+                f'{_fmt(prom_mensual)}<small>prom. mensual</small>',
+                (
+                    f'<span>Total últimos 12 meses</span>'
+                    f'<span class="num">{_fmt(total_anual)}</span>'
+                ),
+                badges,
+            )
             st.markdown(
                 f'<div class="tx-detached">{tx_html}</div>',
                 unsafe_allow_html=True,
             )
+
+        if show_renabap:
+            with st.spinner("Midiendo cobertura RE-NABAP..."):
+                ren_centroids = load_renabap_centroids()
+                lats, lons = [], []
+                for _, route_row in line_routes.iterrows():
+                    for segment in route_row["coords"]:
+                        lats.extend(float(c[1]) for c in segment)
+                        lons.extend(float(c[0]) for c in segment)
+                ren_near = stops_near_route(ren_centroids, lats, lons, RENABAP_RADIUS_M)
+            familias = int(ren_near["familias"].sum()) if not ren_near.empty else 0
+            st.markdown(
+                f'<div style="color:#aeb8cc;font-size:15px;margin-bottom:6px;">'
+                f'Barrios populares a ≤{RENABAP_RADIUS_M} m del recorrido: '
+                f'<b style="color:#ffffff;">{len(ren_near)}</b> '
+                f'(≈ {_fmt(familias)} familias, ~{_fmt(familias * 4)} personas).</div>',
+                unsafe_allow_html=True,
+            )
     elif linea == "Todas las líneas":
-        total_km = sum(_route_distance_m(row) for _, row in routes_df.iterrows()) / 1000.0
+        total_km = routes_df["longitud_m"].sum() / 1000.0
         st.caption(
             f"{len(stops_df)} paradas y {len(routes_df)} recorridos "
-            f"para {len(lineas)} líneas ({total_km:,.0f} km totales de recorrido)."
+            f"para {len(lineas)} líneas ({total_km:,.0f} km acumulados ida+vuelta)."
         )
     else:
         st.caption("Seleccioná una línea para ver sus recorridos y paradas, o mostrá todas las líneas.")
 
 m = folium.Map(location=[-34.6037, -58.3816], zoom_start=12)
 
+comuna_demanda = pd.DataFrame()
 if linea == "Todas las líneas":
     for _, route_row in routes_df.iterrows():
-        color, band = route_colors(LINE_COLORS.get(route_row["linea"]))
-        draw_route(m, route_row, color, band)
+        color, _ = route_colors(LINE_COLORS.get(route_row["linea"]))
+        draw_route(
+            m,
+            route_row["coords_simple"],
+            color,
+            None,
+            weight=2,
+            opacity=0.45,
+        )
+
+    if show_demanda_comuna:
+        with st.spinner("Estimando demanda por comuna..."):
+            comunas_fc = load_comunas()
+            comuna_demanda = comuna_demand_table(stops_df, sube_all)
+        if not comuna_demanda.empty:
+            vals = np.linspace(0, 1, CHOROPLETH_BINS + 1)
+            thresholds = np.quantile(comuna_demanda["usos"], vals).tolist()
+            thresholds = sorted(set(thresholds))
+            folium.Choropleth(
+                geo_data=comunas_fc,
+                data=comuna_demanda[["comuna", "usos"]],
+                columns=["comuna", "usos"],
+                key_on="feature.properties.comuna",
+                fill_color="YlOrRd",
+                fill_opacity=0.55,
+                line_color="#333333",
+                line_weight=1.5,
+                threshold_scale=thresholds,
+                legend_name="Usos SUBE anuales estimados por comuna",
+                name="Demanda estimada por comuna (CABA)",
+            ).add_to(m)
+        else:
+            st.warning("No alcanzaron los datos para estimar la demanda por comuna.")
 elif real_linea:
     for _, route_row in line_routes.iterrows():
         color, band = route_colors(LINE_COLORS.get(linea))
-        draw_route(m, route_row, color, band)
+        draw_route(
+            m,
+            route_row["coords"],
+            color,
+            band,
+            tooltip=(
+                f"Línea {route_row['linea']} - "
+                f"Recorrido {route_row['recorrido']} - {route_row['sentido']}"
+            ),
+        )
 
     for _, stop_row in stops_df[stops_df["linea"] == linea].iterrows():
         folium.CircleMarker(
@@ -948,6 +1213,19 @@ elif real_linea:
 
     if show_osm_stops and not osm_match.empty:
         draw_osm_stops(m, osm_match)
+
+    if show_renabap and not ren_near.empty:
+        for _, b in ren_near.iterrows():
+            folium.CircleMarker(
+                location=[b["lat"], b["lon"]],
+                radius=6,
+                color=RENABAP_COLOR,
+                weight=2,
+                fill=True,
+                fill_color=RENABAP_COLOR,
+                fill_opacity=0.9,
+                tooltip=f"{b['barrio']} — {_fmt(b['familias'])} familias",
+            ).add_to(m)
 
     lats, lons = [], []
     for _, route_row in line_routes.iterrows():
@@ -971,30 +1249,119 @@ if real_linea:
     if line_sube.empty:
         st.info(f"No hay indicadores de transacciones SUBE para la línea {linea}.")
     else:
-        st.subheader(f"Transacciones SUBE - Línea {linea}")
         color, _ = route_colors(LINE_COLORS.get(linea))
-        point = alt.OverlayMarkDef(color=color, filled=True, size=80, strokeWidth=0)
-        sube_12 = line_sube.tail(12)
-        chart = (
-            alt.Chart(sube_12[["fecha", "transacciones"]].copy())
-            .mark_line(color=color, point=point)
-            .encode(
-                x=alt.X("fecha:T", title="Mes", axis=alt.Axis(format="%m/%Y", grid=True)),
-                y=alt.Y("transacciones:Q", title="Transacciones", axis=alt.Axis(format="~s")),
-            )
-        )
-        st.altair_chart(chart, width="stretch")
-        st.caption(
-            f"Fuente: Secretaría de Transporte (datos.transporte.gob.ar) - "
-            f"transacciones SUBE (usos) por fecha. Usos diarios agregados por mes "
-            f"(AMBA), de {sube_12['fecha'].min():%m/%Y} a {sube_12['fecha'].max():%m/%Y}."
-        )
+
+        if vista == VISTA_DIA:
+            if line_sube_daily.empty:
+                st.info(f"No hay desagregación diaria para la línea {linea}.")
+            else:
+                st.subheader(f"Usos por tipo de día - Línea {linea}")
+                tipo_labels = ["Día hábil", "Sábado", "Domingo"]
+                daily_avg = (
+                    line_sube_daily.groupby("tipo_dia", as_index=False)["transacciones"].mean()
+                )
+                daily_avg["tipo_dia"] = pd.Categorical(
+                    daily_avg["tipo_dia"], categories=tipo_labels, ordered=True
+                )
+                bar = (
+                    alt.Chart(daily_avg)
+                    .mark_bar(color=color, size=70)
+                    .encode(
+                        x=alt.X("tipo_dia:N", title="Tipo de día", sort=tipo_labels),
+                        y=alt.Y("transacciones:Q", title="Usos promedio por día"),
+                        tooltip=[
+                            alt.Tooltip("tipo_dia:N", title="Tipo de día"),
+                            alt.Tooltip("transacciones:Q", title="Usos/día", format="~s"),
+                        ],
+                    )
+                    .properties(height=340)
+                )
+                st.altair_chart(bar, width="stretch")
+                st.caption(
+                    f"Promedio de transacciones SUBE diarias por tipo de día "
+                    f"(AMBA, últimos 12 meses completos), de {line_sube_daily['fecha'].min():%d/%m/%Y} "
+                    f"a {line_sube_daily['fecha'].max():%d/%m/%Y}."
+                )
+        else:
+            st.subheader(f"Transacciones SUBE - Línea {linea}")
+            sube_12 = line_sube.tail(12)
+            window_min = sube_12["fecha"].min()
+            window_max = sube_12["fecha"].max()
+
+            bench_series = None
+            bench_label = None
+            if benchmark != BENCH_NINGUNO:
+                if benchmark == BENCH_AMBA:
+                    bench_series = sube_all.groupby("fecha", as_index=False)["transacciones"].sum()
+                    bench_label = "Total AMBA"
+                else:
+                    bench_code = benchmark.split()[-1]
+                    if bench_code != linea:
+                        bench_series = sube_all[sube_all["linea"] == bench_code][["fecha", "transacciones"]]
+                        bench_label = f"Línea {bench_code}"
+                if bench_series is not None:
+                    bench_series = bench_series[
+                        (bench_series["fecha"] >= window_min) & (bench_series["fecha"] <= window_max)
+                    ]
+                    if bench_series.empty:
+                        bench_series = None
+
+            if bench_series is not None and len(bench_series) > 1:
+                d_line = _index_series(sube_12[["fecha", "transacciones"]])
+                d_bench = _index_series(bench_series[["fecha", "transacciones"]])
+                c_line = (
+                    alt.Chart(d_line)
+                    .mark_line(color=color, point=alt.OverlayMarkDef(color=color, filled=True, size=70, strokeWidth=0))
+                    .encode(
+                        x=alt.X("fecha:T", title="Mes", axis=alt.Axis(format="%m/%Y", grid=True)),
+                        y=alt.Y("idx:Q", title="Índice (base = 100 en el primer mes)"),
+                        tooltip=[
+                            alt.Tooltip("fecha:T", title="Mes"),
+                            alt.Tooltip("transacciones:Q", title=f"Usos {linea}", format="~s"),
+                        ],
+                    )
+                )
+                c_bench = (
+                    alt.Chart(d_bench)
+                    .mark_line(color="#9aa7bd", opacity=0.8, strokeDash=[5, 4])
+                    .encode(
+                        x=alt.X("fecha:T", title="Mes"),
+                        y=alt.Y("idx:Q", title="Índice (base = 100)"),
+                        tooltip=[
+                            alt.Tooltip("fecha:T", title="Mes"),
+                            alt.Tooltip("transacciones:Q", title=f"Usos {bench_label}", format="~s"),
+                        ],
+                    )
+                )
+                chart = alt.layer(c_line, c_bench).resolve_scale(y="shared")
+                st.altair_chart(chart, width="stretch")
+                st.caption(
+                    f"Evolución indexada (base 100 = primer mes): Línea {linea} vs {bench_label}. "
+                    f"Ambas curvas parten del mismo valor para comparar el ritmo de crecimiento."
+                )
+            else:
+                point = alt.OverlayMarkDef(color=color, filled=True, size=80, strokeWidth=0)
+                chart = (
+                    alt.Chart(sube_12[["fecha", "transacciones"]].copy())
+                    .mark_line(color=color, point=point)
+                    .encode(
+                        x=alt.X("fecha:T", title="Mes", axis=alt.Axis(format="%m/%Y", grid=True)),
+                        y=alt.Y("transacciones:Q", title="Transacciones", axis=alt.Axis(format="~s")),
+                    )
+                )
+                st.altair_chart(chart, width="stretch")
+                st.caption(
+                    f"Fuente: Secretaría de Transporte (datos.transporte.gob.ar) - "
+                    f"transacciones SUBE (usos) por fecha. Usos diarios agregados por mes "
+                    f"(AMBA), de {window_min:%m/%Y} a {window_max:%m/%Y}."
+                )
 
 with st.expander("Sobre los datos"):
     st.markdown(
         "Fuente: [BA Data](https://data.buenosaires.gob.ar) - "
         "[Colectivos: recorridos](https://data.buenosaires.gob.ar/dataset/colectivos-recorridos), "
-        "[Colectivos: paradas](https://data.buenosaires.gob.ar/dataset/colectivos-paradas). "
+        "[Colectivos: paradas](https://data.buenosaires.gob.ar/dataset/colectivos-paradas), "
+        "[Comunas](https://data.buenosaires.gob.ar/dataset/comunas). "
         "Licencia CC-BY-2.5-AR. "
         "Barrios populares: [RE-NABAP](https://www.argentina.gob.ar/obras-publicas/sisu/renabap) "
         "(Registro Nacional de Barrios Populares, dataset 2023 filtrado a AMBA). "
@@ -1006,4 +1373,16 @@ with st.expander("Sobre los datos"):
         "Los recorridos se colorean según la librea definida por línea (colores cargados "
         "manualmente en lineas_colores.xlsx); el sentido se indica en el tooltip de "
         "cada trazo."
+    )
+    st.markdown(
+        "**Métricas e interpretación:** *usos* son transbordos de tarjeta SUBE (una validación por "
+        "uso, incluye transbordos, no incluye pago en efectivo). La serie es AMBA completo aunque la "
+        "línea se elija como CABA. Las métricas de demanda NO están ajustadas por cantidad de "
+        "colectivos ni por estacionalidad. "
+        "**Usos por km** = total de usos de los últimos 12 meses dividido la longitud del recorrido "
+        "seleccionado (ida + vuelta); es una proxy de productividad por corredor. "
+        "**Demanda por comuna** es una estimación: se reparte la demanda AMBA de cada línea entre "
+        "sus paradas de CABA (proporcional al número de paradas por comuna), no es demanda real por "
+        "parada. **Cobertura RE-NABAP**: conteo de barrios populares cuyo centroide queda a "
+        "≤ 300 m del recorrido; personas estimadas como familias × 4 (excluye Casa Propia/otros)."
     )
