@@ -24,7 +24,16 @@ OSM_STOPS_URLS = [
 ]
 OSM_STOPS_URL = OSM_STOPS_URLS[0]
 OSM_STOPS_USER_AGENT = "panel-transporte-caba/1.0 (dashboard Streamlit de colectivos AMBA)"
-OSM_AMBA_BBOX = "(-35.02,-58.80,-34.40,-58.05)"
+OSM_AMBA_BBOX = "(-35.20,-59.45,-34.00,-57.85)"
+
+RMBA_BASE_URL = "https://datos.transporte.gob.ar/dataset/f87b93d4-ade2-44fc-a409-d3736ba9f3ba/resource"
+RMBA_NACIONAL_URL = f"{RMBA_BASE_URL}/84947471-9c1e-4a23-8a2e-03a8c87c056f/download/lineasbusrmbajurisdiccionnacional.geojson"
+RMBA_PROVINCIAL_URL = f"{RMBA_BASE_URL}/f95e25bc-a6b2-4a78-a04b-35fa437be96b/download/lineasbusrmbajurisdiccionprovincial.geojson"
+RMBA_MUNICIPAL_URL = f"{RMBA_BASE_URL}/f0f3791a-addc-4143-bb95-ef0e8bca5bd8/download/lineasbusrmbajurisdiccionmunicipal.geojson"
+SUBTE_LINEAS_URL = f"{RMBA_BASE_URL}/9341189e-6f06-43d7-a5ed-a34f3435fbcc/download/reddesubterraneo1.geojson"
+SUBTE_ESTACIONES_URL = f"{RMBA_BASE_URL}/79f1bdc7-857e-4295-b19a-bfdd074384e0/download/estacionesdesubte.geojson"
+FFCC_LINEAS_URL = f"{RMBA_BASE_URL}/367a26af-c5b4-4361-b614-abd6ad743383/download/ambalineas.geojson"
+FFCC_ESTACIONES_URL = "https://cdn.buenosaires.gob.ar/datosabiertos/datasets/transporte-y-obras-publicas/estaciones-ferrocarril/estaciones-de-ferrocarril.geojson"
 
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 STOPS_FILE = os.path.join(DATA_DIR, "paradas-de-colectivo.geojson")
@@ -35,10 +44,31 @@ OSM_STOPS_FILE = os.path.join(DATA_DIR, "paradas_amba_osm.geojson")
 SUBE_USOS_2024_FILE = os.path.join(DATA_DIR, "dat-ab-usos-2024.csv")
 SUBE_USOS_2025_FILE = os.path.join(DATA_DIR, "dat-ab-usos-2025.csv")
 SUBE_USOS_2026_FILE = os.path.join(DATA_DIR, "dat-ab-usos-2026.csv")
+RMBA_NACIONAL_FILE = os.path.join(DATA_DIR, "rmba_nacional.geojson")
+RMBA_PROVINCIAL_FILE = os.path.join(DATA_DIR, "rmba_provincial.geojson")
+RMBA_MUNICIPAL_FILE = os.path.join(DATA_DIR, "rmba_municipal.geojson")
+SUBTE_LINEAS_FILE = os.path.join(DATA_DIR, "subte_lineas.geojson")
+SUBTE_ESTACIONES_FILE = os.path.join(DATA_DIR, "subte_estaciones.geojson")
+FFCC_LINEAS_FILE = os.path.join(DATA_DIR, "ffcc_lineas.geojson")
+FFCC_ESTACIONES_FILE = os.path.join(DATA_DIR, "ffcc_estaciones.geojson")
 
 SUBE_MONTHLY_FILE = os.path.join(DATA_DIR, "sube_usos_mensuales.csv")
 SUBE_DAILY_FILE = os.path.join(DATA_DIR, "sube_usos_diarios.csv")
 SUBE_AGG_META_FILE = os.path.join(DATA_DIR, "sube_agregados_meta.json")
+
+AMBA_BUS_SOURCES = [
+    (RMBA_NACIONAL_FILE, RMBA_NACIONAL_URL, "recorridos RMBA nacionales", "NACIONAL"),
+    (RMBA_PROVINCIAL_FILE, RMBA_PROVINCIAL_URL, "recorridos RMBA provinciales", "PROVINCIAL"),
+    (RMBA_MUNICIPAL_FILE, RMBA_MUNICIPAL_URL, "recorridos RMBA municipales", "MUNICIPAL"),
+]
+AMBA_OVERLAY_SOURCES = [
+    (SUBTE_LINEAS_FILE, SUBTE_LINEAS_URL, "líneas de subte"),
+    (SUBTE_ESTACIONES_FILE, SUBTE_ESTACIONES_URL, "estaciones de subte"),
+    (FFCC_LINEAS_FILE, FFCC_LINEAS_URL, "líneas de ferrocarril"),
+    (FFCC_ESTACIONES_FILE, FFCC_ESTACIONES_URL, "estaciones de ferrocarril"),
+]
+# Límites del transporte de superficie AMBA (BA Data ya cubre todo el AMBA).
+AMBA_BUS_BOUNDS = [[-35.1876, -59.4382], [-34.0418, -57.9211]]
 
 DATA_SOURCES = [
     (STOPS_FILE, STOPS_URL),
@@ -58,6 +88,9 @@ RENABAP_AMBA_DEPTS = {
 
 RENABAP_COLOR = "#d62728"
 RENABAP_RADIUS_M = 300
+SUBTE_COLOR = "#7b2fbf"
+FFCC_COLOR = "#1f77b4"
+JUR_COLOR = {"PROVINCIAL": "#2e9e4b", "MUNICIPAL": "#f2a30f", "NACIONAL": "#1f77b4"}
 
 CABA_BOX = {
     "lat_min": -34.705, "lat_max": -34.520,
@@ -275,6 +308,19 @@ def ensure_local_data() -> list:
         except Exception as e:
             messages.append(f"No se pudo descargar RE-NABAP: {e}")
 
+    bus_downloads = [(p, u, l) for p, u, l, _j in AMBA_BUS_SOURCES]
+    for path, url, label in bus_downloads + AMBA_OVERLAY_SOURCES:
+        if not os.path.exists(path):
+            messages.append(f"Descargando {label}...")
+            try:
+                resp = requests.get(url, timeout=600)
+                resp.raise_for_status()
+                with open(path, "wb") as f:
+                    f.write(resp.content)
+                messages.append(f"Descargado {os.path.basename(path)}")
+            except Exception as e:
+                messages.append(f"No se pudo descargar {label}: {e}")
+
     return messages
 
 
@@ -396,6 +442,186 @@ def build_routes_table(fc: dict) -> pd.DataFrame:
             }
         )
     return pd.DataFrame(rows)
+
+
+def _clean_route_coords(geom) -> list:
+    if not geom or not geom.get("coordinates"):
+        return []
+    coords = geom["coordinates"]
+    segments = coords if geom["type"] == "MultiLineString" else [coords]
+    out = []
+    for seg in segments:
+        pts = [(float(c[0]), float(c[1])) for c in seg if len(c) >= 2]
+        if pts:
+            out.append(pts)
+    return out
+
+
+def _norm_sentido(v) -> str:
+    if v is None or (isinstance(v, float) and np.isnan(v)):
+        return "IDA"
+    s = str(v).strip().lower()
+    if s in ("0", "ida"):
+        return "IDA"
+    if s in ("1", "vuelta"):
+        return "VUELTA"
+    return "IDA"
+
+
+def _norm_rmba_linea(v) -> str | None:
+    if v is None or (isinstance(v, float) and np.isnan(v)):
+        return None
+    m = re.search(r"(\d+)", str(v))
+    if not m:
+        return None
+    n = int(m.group(1))
+    return f"{n:03d}" if n > 0 else None
+
+
+def _clean_label(v) -> str | None:
+    if v is None or (isinstance(v, float) and np.isnan(v)):
+        return None
+    if isinstance(v, float) and v == int(v):
+        return str(int(v))
+    return str(v)
+
+
+@st.cache_data(show_spinner=False)
+def _load_amba_sources() -> list[tuple[dict, str]]:
+    sources = []
+    for path, _url, _label, jur in AMBA_BUS_SOURCES:
+        if os.path.exists(path):
+            with open(path, encoding="utf-8-sig") as f:
+                sources.append((json.load(f), jur))
+    return sources
+
+
+@st.cache_data(show_spinner=False)
+def build_routes_table_amba(routes_fc: dict, rmba_sources) -> pd.DataFrame:
+    base = build_routes_table(routes_fc)
+    base["jurisdiccion"] = "CABA"
+    rows = []
+    seen = set(base["linea"])
+    for fc, jur in rmba_sources:
+        for feature in fc["features"]:
+            linea = _norm_rmba_linea(feature["properties"].get("LINEA"))
+            if linea is None or linea in seen:
+                continue
+            seen.add(linea)
+            coords = _clean_route_coords(feature["geometry"])
+            if not coords:
+                continue
+            rows.append(
+                {
+                    "linea": linea,
+                    "recorrido": _clean_label(feature["properties"].get("RAMAL")),
+                    "sentido": _norm_sentido(feature["properties"].get("SENTIDO")),
+                    "modalidad": jur,
+                    "desde": None,
+                    "hasta": None,
+                    "coords": coords,
+                    "coords_simple": _simplify_route_coords(coords),
+                    "longitud_m": _route_length_m(coords),
+                    "jurisdiccion": jur,
+                }
+            )
+    extra = pd.DataFrame(rows, columns=list(base.columns))
+    return pd.concat([base, extra], ignore_index=True)
+
+
+def _fc_lines_df(fc: dict, label_field: str, extra=None) -> pd.DataFrame:
+    rows = []
+    for feature in fc["features"]:
+        props = feature["properties"]
+        row = {"coords": _clean_route_coords(feature["geometry"]),
+               "label": _clean_label(props.get(label_field))}
+        if extra:
+            for k, fld in extra.items():
+                row[k] = _clean_label(props.get(fld))
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def build_subte_lines_df(fc: dict) -> pd.DataFrame:
+    return _fc_lines_df(fc, "LINEASUB")
+
+
+def build_subte_stations_df(fc: dict) -> pd.DataFrame:
+    rows = []
+    for feature in fc["features"]:
+        c = feature["geometry"]["coordinates"]
+        props = feature["properties"]
+        rows.append({
+            "estacion": _clean_label(props.get("ESTACION")),
+            "linea": _clean_label(props.get("LINEA")),
+            "lat": float(c[1]), "lon": float(c[0]),
+        })
+    return pd.DataFrame(rows)
+
+
+def build_ffcc_lines_df(fc: dict) -> pd.DataFrame:
+    rows = []
+    for feature in fc["features"]:
+        props = feature["properties"]
+        rows.append({
+            "linea": _clean_label(props.get("Linea")),
+            "descrip": _clean_label(props.get("Descrip")),
+            "coords": _clean_route_coords(feature["geometry"]),
+        })
+    return pd.DataFrame(rows)
+
+
+def build_ffcc_stations_df(fc: dict) -> pd.DataFrame:
+    rows = []
+    for feature in fc["features"]:
+        props = feature["properties"]
+        lon = props.get("long")
+        lat = props.get("lat")
+        if lon is None or lat is None:
+            continue
+        rows.append({
+            "nombre": _clean_label(props.get("nombre")),
+            "linea": _clean_label(props.get("linea")),
+            "ramal": _clean_label(props.get("ramal")),
+            "lat": float(lat), "lon": float(lon),
+        })
+    return pd.DataFrame(rows)
+
+
+def _load_geojson_safe(path: str, url: str, label: str) -> dict | None:
+    try:
+        return load_geojson(path, url)
+    except Exception:
+        st.warning(f"No se pudieron cargar los datos de {label}; se omite la capa.")
+        return None
+
+
+def _empty_lines_df():
+    return pd.DataFrame(columns=["coords", "label"])
+
+
+@st.cache_data(show_spinner=False)
+def load_subte_lines() -> pd.DataFrame:
+    fc = _load_geojson_safe(SUBTE_LINEAS_FILE, SUBTE_LINEAS_URL, "líneas de subte")
+    return build_subte_lines_df(fc) if fc else _empty_lines_df()
+
+
+@st.cache_data(show_spinner=False)
+def load_subte_stations() -> pd.DataFrame:
+    fc = _load_geojson_safe(SUBTE_ESTACIONES_FILE, SUBTE_ESTACIONES_URL, "estaciones de subte")
+    return build_subte_stations_df(fc) if fc else pd.DataFrame(columns=["estacion", "linea", "lat", "lon"])
+
+
+@st.cache_data(show_spinner=False)
+def load_ffcc_lines() -> pd.DataFrame:
+    fc = _load_geojson_safe(FFCC_LINEAS_FILE, FFCC_LINEAS_URL, "líneas de ferrocarril")
+    return build_ffcc_lines_df(fc) if fc else pd.DataFrame(columns=["linea", "descrip", "coords"])
+
+
+@st.cache_data(show_spinner=False)
+def load_ffcc_stations() -> pd.DataFrame:
+    fc = _load_geojson_safe(FFCC_ESTACIONES_FILE, FFCC_ESTACIONES_URL, "estaciones de ferrocarril")
+    return build_ffcc_stations_df(fc) if fc else pd.DataFrame(columns=["nombre", "linea", "ramal", "lat", "lon"])
 
 
 def _normalize_sube_linea(code) -> str | None:
@@ -955,7 +1181,7 @@ st.set_page_config(
 st.markdown(_THEME_CSS, unsafe_allow_html=True)
 
 st.title("Panel de Visualización de Transporte")
-st.subheader("Ciudad Autónoma de Buenos Aires - Líneas de colectivo y paradas")
+st.subheader("Área Metropolitana de Buenos Aires (AMBA) - Colectivos, ferrocarril y subte")
 
 data_messages = ensure_local_data()
 for message in data_messages:
@@ -966,11 +1192,9 @@ with st.spinner("Cargando datos de colectivos..."):
     routes_fc = load_geojson(ROUTES_FILE, ROUTES_URL)
 
 stops_df = build_stops_table(stops_fc)
-routes_df = build_routes_table(routes_fc)
+routes_df = build_routes_table_amba(routes_fc, _load_amba_sources())
 
-route_lineas = set(routes_df["linea"])
 stop_lineas = set(stops_df["linea"])
-lineas = sorted(route_lineas | stop_lineas, key=int)
 
 sube_token = _sube_source_token()
 sube_all = pd.DataFrame()
@@ -980,12 +1204,24 @@ if os.path.exists(SUBE_MONTHLY_FILE) or any(os.path.exists(p) for p in SUBE_SOUR
 col_sel, col_info = st.columns([1, 3])
 
 with col_sel:
+    ambito = st.radio("Ámbito", ["AMBA", "CABA"], horizontal=True, key="ambito_sel")
+    active_routes = (
+        routes_df[routes_df["jurisdiccion"] == "CABA"].reset_index(drop=True)
+        if ambito == "CABA"
+        else routes_df
+    )
+    routes_df = active_routes
+    lineas = sorted(set(routes_df["linea"]) | stop_lineas, key=int)
+
     linea = st.selectbox(
         "Línea de colectivo",
         [SEL_LINEA, "Todas las líneas"] + lineas,
         index=0,
     )
     real_linea = linea not in (SEL_LINEA, "Todas las líneas")
+
+    show_subte = st.checkbox("Subte (CABA)", value=False)
+    show_ffcc = st.checkbox("Ferrocarril (AMBA)", value=False)
 
     recorrido = "Todos"
     sentido = "Ambos"
@@ -1040,10 +1276,15 @@ if real_linea:
         line_routes = line_routes[line_routes["recorrido"] == recorrido]
     if sentido != "Ambos":
         line_routes = line_routes[line_routes["sentido"] == sentido]
+    n_paradas = len(stops_df[stops_df["linea"] == linea])
+    osm_force = ambito == "AMBA" and n_paradas == 0
+else:
+    n_paradas = 0
+    osm_force = False
 
 osm_match = pd.DataFrame()
 ren_near = pd.DataFrame()
-if real_linea and show_osm_stops:
+if real_linea and (show_osm_stops or osm_force):
     with st.spinner("Filtrando paradas AMBA (OSM)..."):
         osm_stops_all = load_osm_stops()
         lats, lons = [], []
@@ -1064,14 +1305,18 @@ if real_linea:
 with col_info:
     if real_linea:
         total_km = line_routes["longitud_m"].sum() / 1000.0
-        n_paradas = len(stops_df[stops_df["linea"] == linea])
         caption = (
-            f"{n_paradas} paradas, "
+            f"{n_paradas} paradas (CABA), "
             f"{len(line_routes)} recorridos "
             f"(recorrido {recorrido}, {sentido})."
         )
         if show_osm_stops:
             caption += f" Paradas AMBA (OSM): {len(osm_match)}."
+        elif osm_force and not osm_match.empty:
+            caption += (
+                f" Sin paradas registradas en CABA; {len(osm_match)} paradas "
+                f"del conurbano (OSM, ≤{OSM_STOP_RADIUS_M} m del recorrido)."
+            )
         st.caption(caption)
 
         if line_sube.empty:
@@ -1081,7 +1326,11 @@ with col_info:
                     _metric_box_html(
                         f"Recorrido · Línea {linea}",
                         f'{_fmt_dec(total_km)}<small>km</small>',
-                        f'<span>{len(line_routes)} recorrido(s) · {n_paradas} paradas (CABA)</span>',
+                        (
+                            f'<span>{len(line_routes)} recorrido(s) · '
+                            f'{len(osm_match) if osm_force else n_paradas} paradas '
+                            f'({"OSM" if osm_force else "CABA"})</span>'
+                        ),
                     ),
                     unsafe_allow_html=True,
                 )
@@ -1183,10 +1432,17 @@ with col_info:
             )
     elif linea == "Todas las líneas":
         total_km = routes_df["longitud_m"].sum() / 1000.0
-        st.caption(
+        caption = (
             f"{len(stops_df)} paradas y {len(routes_df)} recorridos "
             f"para {len(lineas)} líneas ({total_km:,.0f} km acumulados ida+vuelta)."
         )
+        if ambito == "AMBA":
+            cnt = routes_df.groupby("jurisdiccion").size()
+            detalle = ", ".join(
+                f"{cnt.get(j, 0)} {j.lower()}" for j in ("CABA", "NACIONAL", "PROVINCIAL", "MUNICIPAL")
+            )
+            caption += f" Por jurisdicción: {detalle}."
+        st.caption(caption)
     else:
         st.caption("Seleccioná una línea para ver sus recorridos y paradas, o mostrá todas las líneas.")
 
@@ -1195,7 +1451,9 @@ m = folium.Map(location=[-34.6037, -58.3816], zoom_start=12)
 comuna_demanda = pd.DataFrame()
 if linea == "Todas las líneas":
     for _, route_row in routes_df.iterrows():
-        color, _ = route_colors(LINE_COLORS.get(route_row["linea"]))
+        color = JUR_COLOR.get(route_row.get("jurisdiccion"), "#7f7f7f")
+        if route_row.get("jurisdiccion") in (None, "CABA"):
+            color, _ = route_colors(LINE_COLORS.get(route_row["linea"]))
         draw_route(
             m,
             route_row["coords_simple"],
@@ -1204,6 +1462,9 @@ if linea == "Todas las líneas":
             weight=2,
             opacity=0.45,
         )
+
+    if ambito == "AMBA":
+        m.fit_bounds(AMBA_BUS_BOUNDS, padding=(0, 0))
 
     if show_demanda_comuna:
         with st.spinner("Estimando demanda por comuna..."):
@@ -1260,7 +1521,7 @@ elif real_linea:
             ),
         ).add_to(m)
 
-    if show_osm_stops and not osm_match.empty:
+    if (show_osm_stops or osm_force) and not osm_match.empty:
         draw_osm_stops(m, osm_match)
 
     if show_renabap and not ren_near.empty:
@@ -1294,6 +1555,57 @@ if show_renabap:
         draw_renabap(m, renabap_fc)
     else:
         st.warning("No se pudieron cargar los barrios populares RE-NABAP; se omite la capa.")
+
+if show_subte:
+    with st.spinner("Dibujando red de subte..."):
+        subte_lines = load_subte_lines()
+        subte_stations = load_subte_stations()
+    for _, r in subte_lines.iterrows():
+        draw_route(
+            m, r["coords"], SUBTE_COLOR, None,
+            weight=2.5, opacity=0.75, tooltip=f"Subte - Línea {r['label']}",
+        )
+    for _, r in subte_stations.iterrows():
+        folium.CircleMarker(
+            location=[r["lat"], r["lon"]],
+            radius=4,
+            color="white",
+            fill=True,
+            fill_color=SUBTE_COLOR,
+            fill_opacity=0.9,
+            tooltip=f"{r['estacion']} · Línea {r['linea']}" if r["estacion"] else f"Subte Línea {r['linea']}",
+            popup=folium.Popup(
+                f"<b>{r['estacion']}</b><br>Línea {r['linea']}",
+                max_width=220,
+            ) if r["estacion"] else "",
+        ).add_to(m)
+
+if show_ffcc:
+    with st.spinner("Dibujando red ferroviaria..."):
+        ffcc_lines = load_ffcc_lines()
+        ffcc_stations = load_ffcc_stations()
+    for _, r in ffcc_lines.iterrows():
+        label = f"Ferrocarril {r['linea']}"
+        if r["descrip"]:
+            label += f" - {r['descrip']}"
+        draw_route(
+            m, r["coords"], FFCC_COLOR, None,
+            weight=2.5, opacity=0.75, tooltip=label,
+        )
+    for _, r in ffcc_stations.iterrows():
+        folium.CircleMarker(
+            location=[r["lat"], r["lon"]],
+            radius=4,
+            color="white",
+            fill=True,
+            fill_color=FFCC_COLOR,
+            fill_opacity=0.9,
+            tooltip=f"{r['nombre']} · {r['linea']}" if r["nombre"] else f"Ferrocarril {r['linea']}",
+            popup=folium.Popup(
+                f"<b>{r['nombre']}</b><br>Línea {r['linea']}",
+                max_width=220,
+            ) if r["nombre"] else "",
+        ).add_to(m)
 
 st_folium(m, width="100%", height=650, returned_objects=[])
 
@@ -1415,6 +1727,11 @@ with st.expander("Sobre los datos"):
         "[Colectivos: paradas](https://data.buenosaires.gob.ar/dataset/colectivos-paradas), "
         "[Comunas](https://data.buenosaires.gob.ar/dataset/comunas). "
         "Licencia CC-BY-2.5-AR. "
+        "Recorridos del conurbano: [Recorridos de Líneas de Transporte "
+        "RMBA](https://datos.transporte.gob.ar/dataset/recorridos-de-lineas-de-transporte-rmba-jn) "
+        "(Secretaría de Transporte: jurisdicciones nacional, provincial y municipal); "
+        "red de subte y ferrocarril del mismo dataset RMBA más "
+        "[estaciones de ferrocarril de BA Data](https://data.buenosaires.gob.ar/dataset/juqdkmgo-102). "
         "Barrios populares: [RE-NABAP](https://www.argentina.gob.ar/obras-publicas/sisu/renabap) "
         "(Registro Nacional de Barrios Populares, dataset 2023 filtrado a AMBA). "
         "Paradas del conurbano: [OpenStreetMap](https://www.openstreetmap.org) "
@@ -1424,7 +1741,9 @@ with st.expander("Sobre los datos"):
         "(usos diarios por línea en AMBA, agregados mensualmente). "
         "Los recorridos se colorean según la librea definida por línea (colores cargados "
         "manualmente en lineas_colores.xlsx); el sentido se indica en el tooltip de "
-        "cada trazo."
+        "cada trazo. En el modo AMBA, los recorridos provinciales y municipales se "
+        "dibujan en un color propio (verde/naranja) y el rojo azulado identifica "
+        "jurisdicción nacional/CABA."
     )
     st.markdown(
         "**Métricas e interpretación:** *usos* son transbordos de tarjeta SUBE (una validación por "

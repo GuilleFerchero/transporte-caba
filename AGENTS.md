@@ -3,21 +3,35 @@
 ## Descripción
 
 Dashboard interactivo en **Streamlit + Folium** para visualizar líneas de colectivo
-y sus paradas en la Ciudad Autónoma de Buenos Aires, usando **datos abiertos** del
-Gobierno de la Ciudad (BA Data).
+y sus paradas en la **Ciudad Autónoma de Buenos Aires y el Área Metropolitana de
+Buenos Aires (AMBA)**, usando **datos abiertos** del Gobierno de la Ciudad (BA Data)
+y la Secretaría de Transporte (RMBA).
 
 ## Estado actual
 
 - `app.py` es la única fuente de la app. Hay un selector de **línea de colectivo**
-  (dropdown con 137 líneas + opción "Todas las líneas") y filtros de recorrido/sentido.
+  (dropdown con ~304 líneas AMBA + opción "Todas las líneas") y filtros de
+  recorrido/sentido.
+- **Toggle de ámbito** `AMBA / CABA` (radio, default AMBA). En modo AMBA se usa la
+  tabla consolidada `build_routes_table_amba` (BA Data + recorridos RMBA de la
+  Secretaría de Transporte); en modo CABA se filtra a los recorridos `jurisdiccion ==
+  "CABA"` (comportamiento histórico).
+- En modo AMBA hay dos **overlays opcionales**: `Subte (CABA)` (líneas + estaciones)
+  y `Ferrocarril (AMBA)` (líneas `ambalineas.geojson` + estaciones
+  `estaciones-de-ferrocarril.geojson` de BA Data, 230 paradas con nombre).
 - Al seleccionar una línea: dibuja los **recorridos** (PolyLines coloreados por
   librea), muestra las **paradas** como CircleMarker con popup (dirección, barrio,
   comuna) y ajusta el zoom a los límites de la línea.
-- En "Todas las líneas": dibuja los 1104 recorridos con **geometrías simplificadas**
-  (`coords_simple`, decimación a ~30 m) para abaratar el render; opcionalmente
-  superpone un **choropleth de demanda estimada por comuna** (`comunas.geojson` de
-  BA Data): reparte los usos AMBA de cada línea entre sus paradas de CABA
-  proporcional al nº de paradas por comuna.
+- **Paradas del conurbano**: las líneas que no tienen paradas CABA registradas (p.ej.
+  RMBA municipales 500+ o provinciales que no entran a Capital) **fuerzan la capa
+  OSM**: se cuentan y dibujan automáticamente las paradas de OpenStreetMap a ≤150 m
+  del recorrido, sin tildar el checkbox.
+- En "Todas las líneas" (AMBA): dibuja los ~1274 recorridos con **geometrías
+  simplificadas** (`coords_simple`, decimación a ~30 m); se colorean **por
+  jurisdicción**: librea para CABA/nacional, verde provincial, naranja municipal
+  (40.058 km acumulados, con `fit_bounds` al AMBA). En CABA sigue el **choropleth de
+  demanda estimada por comuna** (`comunas.geojson` de BA Data): reparte los usos
+  AMBA de cada línea entre sus paradas de CABA proporcional al nº de paradas.
 - KPIs por línea (reemplazan a las viejas cajas de distancias Euclidiana/Manhattan):
   **longitud del recorrido** (precomputada como `longitud_m` en `build_routes_table`),
   **usos por día** (promedio del último mes completo) y **usos por km anual**
@@ -50,6 +64,25 @@ Gobierno de la Ciudad (BA Data).
 - **Comunas**: `Comunas` (GeoJSON `comunas.geojson`, ~0,6 MB, 15 features con propiedad
   `comuna` 1..15). Usado para el choropleth de demanda por comuna. Ojo: el archivo
   trae **BOM**, por eso `load_geojson` lee con `utf-8-sig`.
+- **Recorridos RMBA (Secretaría de Transporte, datos.transporte.gob.ar)** — dataset
+  `recorridos-de-lineas-de-transporte-rmba-jn`:
+  - `rmba_nacional.geojson` (1172 features, JURISDICCI "NACIONAL", `LINEA`/`RAMAL`/
+    `SENTIDO` IDA o VUELTA) → recurso `84947471-9c1e-4a23-8a2e-03a8c87c056f`.
+  - `rmba_provincial.geojson` (600 features, JURISDICCI "PROVINCIAL", `SENTIDO` 0/1) →
+    recurso `f95e25bc-a6b2-4a78-a04b-35fa437be96b`.
+  - `rmba_municipal.geojson` (459 features `LineString`, `LINEA` 501..557) →
+    recurso `f0f3791a-addc-4143-bb95-ef0e8bca5bd8`.
+  - URL base de recursos: `https://datos.transporte.gob.ar/dataset/f87b93d4-ade2-44fc-a409-d3736ba9f3ba/resource/<id>/download/<archivo>`.
+  - **Geometrías con >2 dims**: hay que sanitizar a `(lon, lat)` (2 dims) y aceptar
+    `LineString` y `MultiLineString`. Se usa `_clean_route_coords()`.
+  - Aportan **170 líneas nuevas** (7 nacionales + 106 provinciales + 57 municipales);
+    147 de ellas tienen datos SUBE. La dedupe contra BA Data es **por número de línea**
+    (BA Data ya cubre todo el AMBA con geometría casi idéntica a la nacional RMBA).
+- **Subte/ferrocarril (RMBA)** — `subte_lineas.geojson` (79, `LINEASUB`),
+  `subte_estaciones.geojson` (86, `ESTACION`/`LINEA`), `ffcc_lineas.geojson`
+  (23, `Linea`/`Descrip`). Las **estaciones de ferrocarril** se toman de BA Data
+  (`estaciones-ferrocarril`, 230 paradas con `nombre`/`linea`/`ramal`/`long`/`lat`),
+  no del KML `ambapuntos.kml` de RMBA (302 puntos sin nombres).
 - **Transacciones SUBE**: Secretaría de Transporte (datos.transporte.gob.ar) →
   "SUBE - Cantidad de transacciones (usos) por fecha" (CSV diario por línea,
   `dat-ab-usos-2025.csv` y `dat-ab-usos-2026.csv`, ~65 MB y ~47 MB).
@@ -84,7 +117,11 @@ Gobierno de la Ciudad (BA Data).
   - `data/dat-ab-usos-2024.csv`, `data/dat-ab-usos-2025.csv` y `data/dat-ab-usos-2026.csv`
   - `data/sube_usos_mensuales.csv` y `data/sube_usos_diarios.csv` (**agregados derivados**,
     se regeneran solos; ~4 MB en total vs ~165 MB de los CSVs originales)
-- `ensure_local_data()` crea `data/` y, si falta algún archivo, lo descarga de BA Data.
+  - `data/rmba_nacional.geojson`, `data/rmba_provincial.geojson`, `data/rmba_municipal.geojson`
+  - `data/subte_lineas.geojson`, `data/subte_estaciones.geojson`, `data/ffcc_lineas.geojson`,
+    `data/ffcc_estaciones.geojson` (BA Data, con nombres)
+- `ensure_local_data()` crea `data/` y, si falta algún archivo, lo descarga de BA Data
+  (las fuentes AMBA —RMBA, subte/ferro— son tolerantes: si fallan, la app degrada a CABA).
 - `load_geojson(path, url)` lee el archivo local con `utf-8-sig` (tolera BOM, ej. comunas);
   si no existe, descarga.
 - **Agregados SUBE**: `_build_sube_aggregates()` lee los CSV diarios
@@ -105,6 +142,15 @@ Gobierno de la Ciudad (BA Data).
   punto) y **`coords_simple`** (decimado ~30 m, usado solo en "Todas las líneas"). Así
   los km del caption y el mapa agregado NO recomputan por rerun (antes se sumaba con
   numpy por punto en cada rerun).
+- `build_routes_table_amba(routes_fc, sources)` consolida BA Data + RMBA. La dedupe es
+  **por número de línea** (`_norm_rmba_linea`, primer grupo de dígitos + `zfill(3)`): la
+  geometría RMBA nacional es casi idéntica a BA Data, así que solo se agregan las líneas
+  que BA Data no tiene. Columnas: `linea, recorrido, sentido, modalidad, desde, hasta,
+  coords, coords_simple, longitud_m, jurisdiccion` (`CABA | NACIONAL | PROVINCIAL |
+  MUNICIPAL`).
+- **Paradas OSM / bbox**: `OSM_AMBA_BBOX = "(-35.20,-59.45,-34.00,-57.85)"` cubre el
+  AMBA oeste completo (La Plata, Moreno, Ezeiza). Si se agrandó el bbox y quedó un
+  `paradas_amba_osm.geojson` viejo localmente, borrarlo para que re-descargue.
 - Todo el procesamiento está cacheado con `@st.cache_data` (tablas de stops y routes
   en pandas), para no reparsear los 15 MB en cada rerun.
 - `data/` está en `.gitignore`. Para regenerar testear offline borrar archivos localmente y la app descarga sola.
@@ -190,16 +236,15 @@ streamlit run app.py
 ## Entorno
 
 - Windows, shell PowerShell. Python 3.13.2. La app corre en el venv `venv/` del repo.
-- Librerías: streamlit 1.62.0, folium 0.20.0, streamlit-folium 0.27.4, pandas 2.2.3,
-  requests 2.32.3.
+- Librerías: streamlit 1.63.0, folium 0.20.0, streamlit-folium 0.27.4, pandas 3.0.5,
+  numpy 2.5.2, altair 6.2.2, requests 2.32.3.
 
 ## Pendientes / ideas
 
-- Commit + push de las fases de mejora: KPIs de transporte (usos/día, usos/km),
-  benchmark base 100, vista tipo de día, cobertura RE-NABAP, choropleth por comuna
-  y agregados SUBE en disco.
 - Eventualmente: posiciones en tiempo real de colectivos (API de transporte, pero
   BA Data indica que las APIs/GTFS están suspendidos en revisión).
+- Pulir: en "Todas las líneas" AMBA el render de 1274 recorridos es pesado en Cloud;
+  la capa OSM forzada usa el bbox ampliado solo si se regenera `paradas_amba_osm.geojson`.
 
 ## Deploy
 
