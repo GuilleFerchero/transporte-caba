@@ -44,9 +44,10 @@ y la Secretaría de Transporte (RMBA).
 - **Vista "Tipo de día"**: barra con el promedio de usos diarios de la línea por
   `Día hábil / Sábado / Domingo` (últimos 12 meses completos), usando el agregado
   diario.
-- **Cobertura RE-NABAP**: con el checkbox de barrios populares activo se cuentan los
-  barrios cuyo centroide queda a ≤300 m del recorrido (familias y ~personas = ×4) y
-  se marcan en el mapa.
+- **Cobertura RE-NABAP**: el checkbox de barrios populares está disponible **siempre**
+  (no requiere seleccionar un colectivo) y mide los barrios cuya **frontera** cae a
+  ≤300 m del recorrido seleccionado y/o de las redes de **subte y ferrocarril**
+  activadas (familias y ~personas = ×4), marcándolos con un punto en su centroide.
 - El gráfico y las cajas usan los últimos 12 meses; se descartan las líneas sin
   datos y el mes en curso si está incompleto.
 
@@ -180,8 +181,12 @@ y la Secretaría de Transporte (RMBA).
   el primer mes (`_index_series`) y se superponen dos `mark_line` con `alt.layer`.
 - **Cobertura y score de proximidad**: el filtro espacial por radio
   (`stops_near_route`, haversine bacheada) es genérico: se reusa tanto para las
-  paradas OSM del conurbano (≤150 m) como para los centroides RE-NABAP (≤300 m).
-  Los centroides de barrio se aproximan como el promedio de vértices de los polígonos.
+  paradas OSM del conurbano (≤150 m) como para la cobertura RE-NABAP (≤300 m). Para
+  RE-NABAP la cercanía se mide contra los **vértices de la frontera** de cada
+  polígono (`load_renabap_points`), NO contra el centroide: barrios alargados (p.ej.
+  Villa Itatí) bordean la ruta pero su centroide cae a >300 m y quedarían afuera. El
+  centroide se usa solo para ubicar el marcador (`load_renabap_centroids`, promedio
+  de vértices).
 - **Choropleth por comuna**: es una **estimación** (reparto proporcional al nº de
   paradas de CABA de cada línea), no demanda real por parada; el expander "Sobre los
   datos" lo aclara. El campo `COMUNA` de paradas trae un valor corrupto `76` que se
@@ -245,6 +250,11 @@ streamlit run app.py
   BA Data indica que las APIs/GTFS están suspendidos en revisión).
 - Pulir: en "Todas las líneas" AMBA el render de 1274 recorridos es pesado en Cloud;
   la capa OSM forzada usa el bbox ampliado solo si se regenera `paradas_amba_osm.geojson`.
+- **Usos SUBE por hora (día vs noche)**: descartado por ahora. No existe dataset abierto
+  por hora por línea; lo único horario es el estudio de "un día hábil promedio" por
+  hexágono/modo (sin línea) y "Subte: viajes por molinete" de SBASE (solo subte). Si se
+  quisiera un día, habría que estimar repartiendo el total diario con un perfil horario
+  típico (con disclaimer) o limitarse a subte.
 
 ## Deploy
 

@@ -92,6 +92,25 @@ SUBTE_COLOR = "#7b2fbf"
 FFCC_COLOR = "#1f77b4"
 JUR_COLOR = {"PROVINCIAL": "#2e9e4b", "MUNICIPAL": "#f2a30f", "NACIONAL": "#1f77b4"}
 
+SUBTE_LINE_COLORS = {
+    "A": "#00b3e6",
+    "B": "#e2001a",
+    "C": "#004b97",
+    "D": "#009a44",
+    "E": "#60247e",
+    "H": "#ffd100",
+}
+
+
+def _subte_line_letter(linea) -> str:
+    s = str(linea or "")
+    letters = [w for w in s.split() if w.isalpha()]
+    return letters[-1].upper() if letters else s.strip().upper()
+
+
+def _subte_line_color(linea) -> str:
+    return SUBTE_LINE_COLORS.get(_subte_line_letter(linea), SUBTE_COLOR)
+
 CABA_BOX = {
     "lat_min": -34.705, "lat_max": -34.520,
     "lon_min": -58.533, "lon_max": -58.340,
@@ -942,7 +961,7 @@ def _load_renabap_geojson():
 def load_renabap_centroids() -> pd.DataFrame:
     fc = _load_renabap_geojson()
     if fc is None:
-        return pd.DataFrame(columns=["barrio", "partido", "lat", "lon", "familias"])
+        return pd.DataFrame(columns=["id", "barrio", "partido", "lat", "lon", "familias"])
     rows = []
     for feature in fc["features"]:
         props = feature["properties"]
@@ -961,6 +980,7 @@ def load_renabap_centroids() -> pd.DataFrame:
             continue
         rows.append(
             {
+                "id": props.get("id_renabap"),
                 "barrio": props.get("nombre_barrio"),
                 "partido": props.get("departamento"),
                 "lat": sum(ys) / len(ys),
@@ -968,6 +988,32 @@ def load_renabap_centroids() -> pd.DataFrame:
                 "familias": props.get("familias_aproximadas"),
             }
         )
+    return pd.DataFrame(rows)
+
+
+@st.cache_data(show_spinner=False)
+def load_renabap_points() -> pd.DataFrame:
+    """Un punto por vértice de la frontera de los polígonos.
+
+    Se usa para medir cobertura: un barrio *borda* el recorrido aunque su
+    centroide quede lejos (barrios alargados como Villa Itatí).
+    """
+    fc = _load_renabap_geojson()
+    if fc is None:
+        return pd.DataFrame(columns=["id", "lat", "lon"])
+    rows = []
+    for feature in fc["features"]:
+        props = feature["properties"]
+        geom = feature["geometry"]
+        if geom["type"] == "Polygon":
+            polys = [geom["coordinates"]]
+        else:
+            polys = geom["coordinates"]
+        b_id = props.get("id_renabap")
+        for poly in polys:
+            for ring in poly:
+                for lon, lat in ring:
+                    rows.append({"id": b_id, "lat": float(lat), "lon": float(lon)})
     return pd.DataFrame(rows)
 
 
@@ -1222,11 +1268,11 @@ with col_sel:
 
     show_subte = st.checkbox("Subte (CABA)", value=False)
     show_ffcc = st.checkbox("Ferrocarril (AMBA)", value=False)
+    show_renabap = st.checkbox("Barrios populares RE-NABAP (AMBA) y cobertura", value=False)
 
     recorrido = "Todos"
     sentido = "Ambos"
     show_osm_stops = False
-    show_renabap = False
     show_demanda_comuna = False
     vista = VISTA_MENSUAL
     benchmark = BENCH_NINGUNO
@@ -1247,7 +1293,6 @@ with col_sel:
             key="sentido_sel",
         )
         show_osm_stops = st.checkbox("Paradas de colectivo AMBA (OpenStreetMap)", value=False)
-        show_renabap = st.checkbox("Barrios populares RE-NABAP (AMBA) y cobertura", value=False)
         if not sube_all.empty:
             vista = st.selectbox(
                 "Vista de demanda",
@@ -1412,24 +1457,6 @@ with col_info:
                 f'<div class="tx-detached">{tx_html}</div>',
                 unsafe_allow_html=True,
             )
-
-        if show_renabap:
-            with st.spinner("Midiendo cobertura RE-NABAP..."):
-                ren_centroids = load_renabap_centroids()
-                lats, lons = [], []
-                for _, route_row in line_routes.iterrows():
-                    for segment in route_row["coords"]:
-                        lats.extend(float(c[1]) for c in segment)
-                        lons.extend(float(c[0]) for c in segment)
-                ren_near = stops_near_route(ren_centroids, lats, lons, RENABAP_RADIUS_M)
-            familias = int(ren_near["familias"].sum()) if not ren_near.empty else 0
-            st.markdown(
-                f'<div style="color:#aeb8cc;font-size:15px;margin-bottom:6px;">'
-                f'Barrios populares a ≤{RENABAP_RADIUS_M} m del recorrido: '
-                f'<b style="color:#ffffff;">{len(ren_near)}</b> '
-                f'(≈ {_fmt(familias)} familias, ~{_fmt(familias * 4)} personas).</div>',
-                unsafe_allow_html=True,
-            )
     elif linea == "Todas las líneas":
         total_km = routes_df["longitud_m"].sum() / 1000.0
         caption = (
@@ -1445,6 +1472,51 @@ with col_info:
         st.caption(caption)
     else:
         st.caption("Seleccioná una línea para ver sus recorridos y paradas, o mostrá todas las líneas.")
+
+    if show_renabap and (real_linea or show_subte or show_ffcc):
+        with st.spinner("Midiendo cobertura RE-NABAP..."):
+            ren_points = load_renabap_points()
+            ren_centroids = load_renabap_centroids()
+            lats, lons = [], []
+            if real_linea:
+                for _, route_row in line_routes.iterrows():
+                    for segment in route_row["coords"]:
+                        lats.extend(float(c[1]) for c in segment)
+                        lons.extend(float(c[0]) for c in segment)
+            if show_subte:
+                for _, r in load_subte_lines().iterrows():
+                    for segment in r["coords"]:
+                        lats.extend(float(c[1]) for c in segment)
+                        lons.extend(float(c[0]) for c in segment)
+            if show_ffcc:
+                for _, r in load_ffcc_lines().iterrows():
+                    for segment in r["coords"]:
+                        lats.extend(float(c[1]) for c in segment)
+                        lons.extend(float(c[0]) for c in segment)
+            ren_near_pts = stops_near_route(ren_points, lats, lons, RENABAP_RADIUS_M)
+            if not ren_near_pts.empty:
+                near_ids = ren_near_pts["id"].dropna().unique()
+                ren_near = ren_centroids[
+                    ren_centroids["id"].isin(near_ids)
+                ].reset_index(drop=True)
+            else:
+                ren_near = ren_centroids.iloc[0:0]
+        familias = int(ren_near["familias"].sum()) if not ren_near.empty else 0
+        fuente = (
+            "del recorrido seleccionado"
+            if real_linea
+            else ("de subte y ferrocarril" if show_subte and show_ffcc
+                  else ("de subte" if show_subte else "del ferrocarril"))
+        )
+        st.markdown(
+            f'<div style="color:#aeb8cc;font-size:15px;margin-bottom:6px;">'
+            f'Barrios populares a ≤{RENABAP_RADIUS_M} m {fuente}: '
+            f'<b style="color:#ffffff;">{len(ren_near)}</b> '
+            f'(≈ {_fmt(familias)} familias, ~{_fmt(familias * 4)} personas).</div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        ren_near = pd.DataFrame()
 
 m = folium.Map(location=[-34.6037, -58.3816], zoom_start=12)
 
@@ -1524,19 +1596,6 @@ elif real_linea:
     if (show_osm_stops or osm_force) and not osm_match.empty:
         draw_osm_stops(m, osm_match)
 
-    if show_renabap and not ren_near.empty:
-        for _, b in ren_near.iterrows():
-            folium.CircleMarker(
-                location=[b["lat"], b["lon"]],
-                radius=6,
-                color=RENABAP_COLOR,
-                weight=2,
-                fill=True,
-                fill_color=RENABAP_COLOR,
-                fill_opacity=0.9,
-                tooltip=f"{b['barrio']} — {_fmt(b['familias'])} familias",
-            ).add_to(m)
-
     lats, lons = [], []
     for _, route_row in line_routes.iterrows():
         for segment in route_row["coords"]:
@@ -1555,14 +1614,26 @@ if show_renabap:
         draw_renabap(m, renabap_fc)
     else:
         st.warning("No se pudieron cargar los barrios populares RE-NABAP; se omite la capa.")
+    for _, b in ren_near.iterrows():
+        folium.CircleMarker(
+            location=[b["lat"], b["lon"]],
+            radius=6,
+            color=RENABAP_COLOR,
+            weight=2,
+            fill=True,
+            fill_color=RENABAP_COLOR,
+            fill_opacity=0.9,
+            tooltip=f"{b['barrio']} — {_fmt(b['familias'])} familias",
+        ).add_to(m)
 
 if show_subte:
     with st.spinner("Dibujando red de subte..."):
         subte_lines = load_subte_lines()
         subte_stations = load_subte_stations()
     for _, r in subte_lines.iterrows():
+        subte_color = _subte_line_color(r["label"])
         draw_route(
-            m, r["coords"], SUBTE_COLOR, None,
+            m, r["coords"], subte_color, None,
             weight=2.5, opacity=0.75, tooltip=f"Subte - Línea {r['label']}",
         )
     for _, r in subte_stations.iterrows():
@@ -1571,7 +1642,7 @@ if show_subte:
             radius=4,
             color="white",
             fill=True,
-            fill_color=SUBTE_COLOR,
+            fill_color=_subte_line_color(r["linea"]),
             fill_opacity=0.9,
             tooltip=f"{r['estacion']} · Línea {r['linea']}" if r["estacion"] else f"Subte Línea {r['linea']}",
             popup=folium.Popup(
