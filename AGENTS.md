@@ -146,6 +146,17 @@ Gobierno de la Ciudad (BA Data).
   `sube_usos_diarios.csv` (~4 MB). La caché de `st.cache_data` se invalida con un
   token derivado de los `mtime` de los fuentes (`_sube_source_token`), porque
   `st.cache_data` no observa archivos por sí solo.
+- **Descargas opcionales resilientes (Cloud)**: en Streamlit Cloud el storage es
+  efímero, así que cada sesión re-descarga los datos. La descarga de paradas OSM
+  (Overpass) solía correr al arranque dentro de `ensure_local_data()` y un error
+  HTTP del endpoint público (`overpass.kumi.systems` devuelve 429/502) rompía toda
+  la app con pantalla roja. Ahora: (a) el OSM se descarga **lazy** recién al tildar
+  el checkbox (con fallback a `overpass-api.de` vía `OSM_STOPS_URLS`); (b) los CSVs
+  SUBE y el RE-NABAP de arranque degradan con warning en vez de lanzar; (c) las
+  funciones de lectura (`_build_sube_aggregates`, `load_sube_daily`,
+  `load_sube_transactions`, `load_renabap_centroids`) devuelven DataFrames vacíos
+  con `st.warning` si fallan. Solo las fuentes core (paradas, recorridos, comunas)
+  siguen fallando duro.
 
 ## Cómo correr la app
 

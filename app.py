@@ -18,7 +18,11 @@ SUBE_USOS_2024_URL = "https://archivos-datos.transporte.gob.ar/upload/Dat_Ab_Uso
 SUBE_USOS_2025_URL = "https://archivos-datos.transporte.gob.ar/upload/Dat_Ab_Usos/dat-ab-usos-2025.csv"
 SUBE_USOS_2026_URL = "https://archivos-datos.transporte.gob.ar/upload/Dat_Ab_Usos/dat-ab-usos-2026.csv"
 RENABAP_AMBA_URL = "https://www.argentina.gob.ar/sites/default/files/renabap-2023-12-06.geojson"
-OSM_STOPS_URL = "https://overpass.kumi.systems/api/interpreter"
+OSM_STOPS_URLS = [
+    "https://overpass.kumi.systems/api/interpreter",
+    "https://overpass-api.de/api/interpreter",
+]
+OSM_STOPS_URL = OSM_STOPS_URLS[0]
 OSM_STOPS_USER_AGENT = "panel-transporte-caba/1.0 (dashboard Streamlit de colectivos AMBA)"
 OSM_AMBA_BBOX = "(-35.02,-58.80,-34.40,-58.05)"
 
@@ -248,50 +252,28 @@ def ensure_local_data() -> list:
         (SUBE_USOS_2026_FILE, SUBE_USOS_2026_URL),
     ):
         if not os.path.exists(path):
-            resp = requests.get(url, timeout=600)
-            resp.raise_for_status()
-            with open(path, "wb") as f:
-                f.write(resp.content)
-            messages.append(f"Descargado {os.path.basename(path)}")
+            messages.append(f"Descargando {os.path.basename(path)}...")
+            try:
+                resp = requests.get(url, timeout=600)
+                resp.raise_for_status()
+                with open(path, "wb") as f:
+                    f.write(resp.content)
+                messages.append(f"Descargado {os.path.basename(path)}")
+            except Exception as e:
+                messages.append(f"No se pudo descargar {os.path.basename(path)}: {e}")
 
     if not os.path.exists(RENABAP_AMBA_FILE):
         messages.append("Descargando RE-NABAP nacional y filtrando AMBA...")
-        resp = requests.get(RENABAP_AMBA_URL, timeout=300)
-        resp.raise_for_status()
-        national = resp.json()
-        amba = _filter_renabap_amba(national)
-        with open(RENABAP_AMBA_FILE, "w", encoding="utf-8") as f:
-            json.dump(amba, f, ensure_ascii=False)
-        messages.append(f"Guardado RE-NABAP AMBA: {len(amba['features'])} barrios")
-
-    if not os.path.exists(OSM_STOPS_FILE):
-        messages.append("Descargando paradas AMBA desde OpenStreetMap (Overpass)...")
-        resp = requests.get(
-            OSM_STOPS_URL,
-            params={"data": _osm_stops_query()},
-            headers={"User-Agent": OSM_STOPS_USER_AGENT},
-            timeout=600,
-        )
-        resp.raise_for_status()
-        osm_raw = resp.json()
-        features = []
-        for el in osm_raw["elements"]:
-            tags = el.get("tags", {})
-            features.append(
-                {
-                    "type": "Feature",
-                    "geometry": {"type": "Point", "coordinates": [el["lon"], el["lat"]]},
-                    "properties": {
-                        "osm_id": el["id"],
-                        "name": tags.get("name"),
-                        "network": tags.get("network"),
-                    },
-                }
-            )
-        fc = {"type": "FeatureCollection", "features": features}
-        with open(OSM_STOPS_FILE, "w", encoding="utf-8") as f:
-            json.dump(fc, f, ensure_ascii=False)
-        messages.append(f"Guardadas paradas AMBA desde OSM: {len(features)}")
+        try:
+            resp = requests.get(RENABAP_AMBA_URL, timeout=300)
+            resp.raise_for_status()
+            national = resp.json()
+            amba = _filter_renabap_amba(national)
+            with open(RENABAP_AMBA_FILE, "w", encoding="utf-8") as f:
+                json.dump(amba, f, ensure_ascii=False)
+            messages.append(f"Guardado RE-NABAP AMBA: {len(amba['features'])} barrios")
+        except Exception as e:
+            messages.append(f"No se pudo descargar RE-NABAP: {e}")
 
     return messages
 
@@ -500,7 +482,11 @@ def _sube_aggregates_fresh() -> bool:
 
 
 def _build_sube_aggregates() -> pd.DataFrame:
-    df = _read_sube_daily_all()
+    try:
+        df = _read_sube_daily_all()
+    except Exception as e:
+        st.warning(f"No se pudieron leer los datos fuente de SUBE: {e}")
+        return pd.DataFrame(columns=["linea", "fecha", "transacciones"])
     if df.empty:
         return pd.DataFrame(columns=["linea", "fecha", "transacciones"])
 
@@ -542,9 +528,12 @@ def _build_sube_aggregates() -> pd.DataFrame:
 @st.cache_data(show_spinner=False)
 def load_sube_transactions(token: str) -> pd.DataFrame:
     if _sube_aggregates_fresh():
-        df = pd.read_csv(SUBE_MONTHLY_FILE, dtype={"linea": str})
-        df["fecha"] = pd.to_datetime(df["fecha"]).dt.to_period("M").dt.to_timestamp()
-        return df[["linea", "fecha", "transacciones"]].sort_values(["linea", "fecha"]).reset_index(drop=True)
+        try:
+            df = pd.read_csv(SUBE_MONTHLY_FILE, dtype={"linea": str})
+            df["fecha"] = pd.to_datetime(df["fecha"]).dt.to_period("M").dt.to_timestamp()
+            return df[["linea", "fecha", "transacciones"]].sort_values(["linea", "fecha"]).reset_index(drop=True)
+        except Exception:
+            pass
     return _build_sube_aggregates()
 
 
@@ -552,7 +541,12 @@ def load_sube_transactions(token: str) -> pd.DataFrame:
 def load_sube_daily(token: str) -> pd.DataFrame:
     if not _sube_aggregates_fresh():
         _build_sube_aggregates()
-    df = pd.read_csv(SUBE_DAILY_FILE, dtype={"linea": str})
+    if not os.path.exists(SUBE_DAILY_FILE):
+        return pd.DataFrame(columns=["linea", "fecha", "transacciones", "tipo_dia"])
+    try:
+        df = pd.read_csv(SUBE_DAILY_FILE, dtype={"linea": str})
+    except Exception:
+        return pd.DataFrame(columns=["linea", "fecha", "transacciones", "tipo_dia"])
     df["fecha"] = pd.to_datetime(df["fecha"])
     return df.sort_values(["linea", "fecha"]).reset_index(drop=True)
 
@@ -613,7 +607,52 @@ def build_osm_stops_table(fc: dict) -> pd.DataFrame:
 
 
 @st.cache_data(show_spinner=False)
+def _download_osm_stops() -> None:
+    errors = []
+    for url in OSM_STOPS_URLS:
+        try:
+            resp = requests.get(
+                url,
+                params={"data": _osm_stops_query()},
+                headers={"User-Agent": OSM_STOPS_USER_AGENT},
+                timeout=600,
+            )
+            resp.raise_for_status()
+            osm_raw = resp.json()
+            features = []
+            for el in osm_raw["elements"]:
+                tags = el.get("tags", {})
+                features.append(
+                    {
+                        "type": "Feature",
+                        "geometry": {"type": "Point", "coordinates": [el["lon"], el["lat"]]},
+                        "properties": {
+                            "osm_id": el["id"],
+                            "name": tags.get("name"),
+                            "network": tags.get("network"),
+                        },
+                    }
+                )
+            fc = {"type": "FeatureCollection", "features": features}
+            with open(OSM_STOPS_FILE, "w", encoding="utf-8") as f:
+                json.dump(fc, f, ensure_ascii=False)
+            return
+        except Exception as e:
+            errors.append(f"{url}: {e}")
+    raise RuntimeError("; ".join(errors))
+
+
+@st.cache_data(show_spinner=False)
 def load_osm_stops() -> pd.DataFrame:
+    if not os.path.exists(OSM_STOPS_FILE):
+        try:
+            _download_osm_stops()
+        except Exception:
+            st.warning(
+                "No se pudieron descargar las paradas AMBA de OpenStreetMap (Overpass). "
+                "Se omite la capa."
+            )
+            return pd.DataFrame(columns=["lat", "lon", "name"])
     with open(OSM_STOPS_FILE, encoding="utf-8") as f:
         fc = json.load(f)
     return build_osm_stops_table(fc)
@@ -666,8 +705,18 @@ def draw_osm_stops(m, stops_df):
 
 
 @st.cache_data(show_spinner=False)
+def _load_renabap_geojson():
+    try:
+        return load_geojson(RENABAP_AMBA_FILE, RENABAP_AMBA_URL)
+    except Exception:
+        return None
+
+
+@st.cache_data(show_spinner=False)
 def load_renabap_centroids() -> pd.DataFrame:
-    fc = load_geojson(RENABAP_AMBA_FILE, RENABAP_AMBA_URL)
+    fc = _load_renabap_geojson()
+    if fc is None:
+        return pd.DataFrame(columns=["barrio", "partido", "lat", "lon", "familias"])
     rows = []
     for feature in fc["features"]:
         props = feature["properties"]
@@ -1240,8 +1289,11 @@ elif real_linea:
 
 if show_renabap:
     with st.spinner("Cargando barrios populares RE-NABAP (AMBA)..."):
-        renabap_fc = load_geojson(RENABAP_AMBA_FILE, RENABAP_AMBA_URL)
-    draw_renabap(m, renabap_fc)
+        renabap_fc = _load_renabap_geojson()
+    if renabap_fc is not None:
+        draw_renabap(m, renabap_fc)
+    else:
+        st.warning("No se pudieron cargar los barrios populares RE-NABAP; se omite la capa.")
 
 st_folium(m, width="100%", height=650, returned_objects=[])
 
