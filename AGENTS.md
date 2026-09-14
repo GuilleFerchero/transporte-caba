@@ -9,7 +9,17 @@ y la Secretaría de Transporte (RMBA).
 
 ## Estado actual
 
-- `app.py` es la única fuente de la app. Hay un selector de **línea de colectivo**
+- **Dos apps separadas** comparten un módulo de datos común:
+  - `app_transporte.py` → análisis de **transporte público** (recorridos, paradas,
+    demanda SUBE, subte, ferrocarril). Es el `app.py` histórico refactorizado.
+  - `app_acceso.py` → análisis de **acceso a la ciudad desde barrios populares**
+    (cobertura RE-NABAP de colectivo/subte/ferro, KPIs de cobertura, resumen por partido).
+  - `data_loaders.py` → **módulo compartido**: constantes/URLs, colores/libreas,
+    funciones de geometría (haversine, simplificación), carga y transformación de
+    todos los datasets (cacheadas con `@st.cache_data`), dibujo en Folium, helpers
+    de formato y el CSS `THEME_CSS`.
+  - `app.py` se conserva **intacto** como backup/referencia de la app original.
+- `app_transporte.py`: hay un selector de **línea de colectivo**
   (dropdown con ~304 líneas AMBA + opción "Todas las líneas") y filtros de
   recorrido/sentido.
 - **Toggle de ámbito** `AMBA / CABA` (radio, default AMBA). En modo AMBA se usa la
@@ -44,10 +54,25 @@ y la Secretaría de Transporte (RMBA).
 - **Vista "Tipo de día"**: barra con el promedio de usos diarios de la línea por
   `Día hábil / Sábado / Domingo` (últimos 12 meses completos), usando el agregado
   diario.
-- **Cobertura RE-NABAP**: el checkbox de barrios populares está disponible **siempre**
+- **Cobertura RE-NABAP**: el análisis completo vive en **`app_acceso.py`** (el checkbox
+  de `app_transporte.py` solo dibuja los polígonos como capa informativa). En
+  `app_acceso.py` el checkbox de barrios populares está disponible **siempre**
   (no requiere seleccionar un colectivo) y mide los barrios cuya **frontera** cae a
-  ≤300 m del recorrido seleccionado y/o de las redes de **subte y ferrocarril**
-  activadas (familias y ~personas = ×4), marcándolos con un punto en su centroide.
+  ≤300 m de la red de colectivo AMBA completa y/o de las redes de **subte y
+  ferrocarril** activadas (familias y ~personas = ×4), los muestra en el mapa
+  coloreados por estado (verde = con cobertura, rojo = sin) y arma un resumen por
+  partido descargable en CSV. La cobertura usa **todos** los recorridos AMBA
+  simultáneamente; por eso se calcula con una **grilla espacial** (`_grid_near_ids`)
+  en vez de `stops_near_route` (que tardaba ~6 min para todo el AMBA; la grilla lo
+  hace en ~1 s). Para no saturar el mapa, el colectivo está **oculto por defecto**;
+  al seleccionar un barrio (select de la sidebar o **clic sobre el polígono** en el
+  mapa, vía `last_object_clicked`/`last_clicked` de `st_folium` + point-in-polygon
+  `_find_barrio_at`) se dibujan solo las líneas de transporte cercanas:
+  colectivo a ≤ `BARRIO_BUS_RADIUS_M` (500 m) y subte/ferrocarril a ≤
+  `BARRIO_RAIL_RADIUS_M` (1200 m), con sus estaciones recortadas a las líneas
+  visibles. Los polígonos RE-NABAP se dibujan **debajo** de las líneas para no
+  taparlas (orden de dibujo) y los trazos de colectivo llevan popup con
+  línea/ramal/sentido (`draw_route(..., popup=...)`).
 - El gráfico y las cajas usan los últimos 12 meses; se descartan las líneas sin
   datos y el mes en curso si está incompleto.
 
@@ -181,12 +206,15 @@ y la Secretaría de Transporte (RMBA).
   el primer mes (`_index_series`) y se superponen dos `mark_line` con `alt.layer`.
 - **Cobertura y score de proximidad**: el filtro espacial por radio
   (`stops_near_route`, haversine bacheada) es genérico: se reusa tanto para las
-  paradas OSM del conurbano (≤150 m) como para la cobertura RE-NABAP (≤300 m). Para
-  RE-NABAP la cercanía se mide contra los **vértices de la frontera** de cada
+  paradas OSM del conurbano (≤150 m, sobre ~1 línea/recorrido) como para la cobertura
+  RE-NABAP. Para RE-NABAP la cercanía se mide contra los **vértices de la frontera** de cada
   polígono (`load_renabap_points`), NO contra el centroide: barrios alargados (p.ej.
   Villa Itatí) bordean la ruta pero su centroide cae a >300 m y quedarían afuera. El
   centroide se usa solo para ubicar el marcador (`load_renabap_centroids`, promedio
-  de vértices).
+  de vértices). En `app_acceso.py` la cobertura se mide contra **todo el AMBA a la vez**
+  (~444k puntos de recorridos × ~22k vértices RE-NABAP); `stops_near_route` tardaba
+  ~6 min, así que se usa `_grid_near_ids`: grilla de ~150 m sobre los puntos de red y
+  búsqueda local de ≤±3 celdas para cada vértice de barrio (~1 s).
 - **Choropleth por comuna**: es una **estimación** (reparto proporcional al nº de
   paradas de CABA de cada línea), no demanda real por parada; el expander "Sobre los
   datos" lo aclara. El campo `COMUNA` de paradas trae un valor corrupto `76` que se
@@ -212,20 +240,20 @@ y la Secretaría de Transporte (RMBA).
 ## Cómo correr la app
 
 ```
-streamlit run app.py
+streamlit run app_transporte.py   # Transporte público (recorridos + demanda SUBE)
+streamlit run app_acceso.py       # Acceso a la ciudad / cobertura RE-NABAP
 ```
 
-- App suele correrse en puerto 8501: `streamlit run app.py --server.port 8501`
+- `app.py` se conserva como referencia histórica (backup de la app original).
+- App suele correrse en puerto 8501: `streamlit run app_transporte.py --server.port 8501`
 - Para probar sin navegador se usa AppTest:
   ```python
   from streamlit.testing.v1 import AppTest
-  at = AppTest.from_file("app.py", default_timeout=120)
-  at.run()
-  at.selectbox[0].select("022")
+  at = AppTest.from_file("app_acceso.py", default_timeout=300)
   at.run()
   print(at.exception)  # debe ser vacío
   ```
-- Verificar sintaxis: `python -m py_compile app.py`
+- Verificar sintaxis: `python -m py_compile data_loaders.py app_transporte.py app_acceso.py`
 
 ## Git / GitHub
 
@@ -256,16 +284,25 @@ streamlit run app.py
   quisiera un día, habría que estimar repartiendo el total diario con un perfil horario
   típico (con disclaimer) o limitarse a subte.
 
+- **Acceso desde barrios populares (`app_acceso.py`)**: la grilla `_grid_near_ids`
+  ya cubre todo el AMBA en ~1 s; ideas a futuro: corredores hacia destinos clave
+  (microcentro, intercambiadores, estaciones terminales), distancia a la estación
+  más cercana por modo, y exportación por barrio (CSV con distancia mínima por red)
+  para organizaciones sociales.
+
 ## Deploy
 
-- La app vive en **Streamlit Community Cloud** (`https://share.streamlit.io`,
-  repo `GuilleFerchero/transporte-caba`, rama `main`, entrypoint `app.py`,
-  Python 3.12). `requirements.txt` fija las versiones del entorno; el primer
+- Las apps viven en **Streamlit Community Cloud** (`https://share.streamlit.io`,
+  repo `GuilleFerchero/transporte-caba`, rama `main`). Hay **dos entrypoints
+  candidatos**: `app_transporte.py` (transporte público) y `app_acceso.py`
+  (acceso a la ciudad), cada uno como una app separada del mismo repo.
+  `requirements.txt` fija las versiones del entorno; el primer
   render de cada sesión descarga ~190 MB de datos (los CSVs de SUBE y GeoJSON) y
   el free tier suspende la app por inactividad (almacenamiento efímero).
 - **Ventaja de un `Dockerfile` (por qué lo queremos algún día):** con un
   contenedor (`python:3.12-slim` + `pip install -r requirements.txt` +
-  `CMD streamlit run app.py`) la app corre en cualquier VPS, **los datos viven en
+  `CMD streamlit run app_transporte.py`) las apps corren en cualquier VPS, **los
+  datos viven en
   un volumen persistente** (se descargan una sola vez, no en cada despertar) y el
   arranque queda en segundos y siempre disponible, sin los límites de memoria y
   de suspensión del Cloud gratuito; también permite escalar/aislar por proyecto.
