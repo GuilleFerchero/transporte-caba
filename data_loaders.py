@@ -1,7 +1,11 @@
 import os
 import re
+import io
 import json
+import zipfile
 import unicodedata
+from collections import defaultdict
+from datetime import datetime
 import numpy as np
 import requests
 import pandas as pd
@@ -56,9 +60,22 @@ SUBTE_ESTACIONES_FILE = os.path.join(DATA_DIR, "subte_estaciones.geojson")
 FFCC_LINEAS_FILE = os.path.join(DATA_DIR, "ffcc_lineas.geojson")
 FFCC_ESTACIONES_FILE = os.path.join(DATA_DIR, "ffcc_estaciones.geojson")
 
+MOLINETES_CDN = "https://cdn.buenosaires.gob.ar/datosabiertos/datasets/sbase/subte-viajes-molinetes"
+MOLINETES_FILES = {
+    2024: "molinetes-2024.zip",
+    2025: "molinetes-2025.zip",
+    2026: "molinetes-2026.zip",
+}
+MOLINETES_DIR = os.path.join(DATA_DIR, "molinetes")
+MOLINETES_AGG_FILE = os.path.join(DATA_DIR, "molinetes_subte.csv")
+MOLINETES_AGG_META_FILE = os.path.join(DATA_DIR, "molinetes_agg_meta.json")
+MOLINETES_AGG_SCHEMA_VERSION = 2
+
 SUBE_MONTHLY_FILE = os.path.join(DATA_DIR, "sube_usos_mensuales.csv")
 SUBE_DAILY_FILE = os.path.join(DATA_DIR, "sube_usos_diarios.csv")
 SUBE_AGG_META_FILE = os.path.join(DATA_DIR, "sube_agregados_meta.json")
+
+ROUTES_SOURCE_FILES = [ROUTES_FILE, RMBA_NACIONAL_FILE, RMBA_PROVINCIAL_FILE, RMBA_MUNICIPAL_FILE]
 
 # ---------------------------------------------------------------------------
 # Fuentes de datos
@@ -98,6 +115,27 @@ RENABAP_AMBA_DEPTS = {
 RENABAP_COLOR = "#d62728"
 RENABAP_RADIUS_M = 300
 
+# Feriados nacionales argentinos (inamovibles, trasladables y puentes), fuente
+# oficial DDJJ (https://api.argentinadatos.com/v1/feriados/). Se actualizan a mano
+# cuando el calendario del año siguiente se publica.
+FERIADOS_ARG = {
+    "2024-01-01", "2024-02-12", "2024-02-13", "2024-03-24", "2024-03-29", "2024-04-01",
+    "2024-04-02", "2024-05-01", "2024-05-25", "2024-06-17", "2024-06-20", "2024-06-21",
+    "2024-07-09", "2024-08-17", "2024-10-11", "2024-10-12", "2024-11-18", "2024-12-08",
+    "2024-12-25",
+    "2025-01-01", "2025-03-03", "2025-03-04", "2025-03-24", "2025-04-02", "2025-04-18",
+    "2025-05-01", "2025-05-02", "2025-05-25", "2025-06-16", "2025-06-20", "2025-07-09",
+    "2025-08-15", "2025-08-17", "2025-10-10", "2025-10-12", "2025-11-21", "2025-11-24",
+    "2025-12-08", "2025-12-25",
+    "2026-01-01", "2026-02-16", "2026-02-17", "2026-03-23", "2026-03-24", "2026-04-02",
+    "2026-04-03", "2026-05-01", "2026-05-25", "2026-06-15", "2026-06-20", "2026-07-09",
+    "2026-07-10", "2026-08-17", "2026-10-12", "2026-11-23", "2026-12-07", "2026-12-08",
+    "2026-12-25",
+    "2027-01-01", "2027-02-08", "2027-02-09", "2027-03-24", "2027-03-26", "2027-04-02",
+    "2027-05-01", "2027-05-25", "2027-06-17", "2027-06-20", "2027-07-09", "2027-08-17",
+    "2027-10-12", "2027-11-20", "2027-12-08", "2027-12-25",
+}
+
 # ---------------------------------------------------------------------------
 # Constantes de mapa / estilos
 # ---------------------------------------------------------------------------
@@ -126,6 +164,7 @@ CHOROPLETH_BINS = 5
 SEL_LINEA = "— Seleccioná una línea —"
 VISTA_MENSUAL = "Mensual"
 VISTA_DIA = "Tipo de día (hábiles vs. finde)"
+VISTA_SEMANA = "Semana tipo (Lunes a Domingo)"
 BENCH_NINGUNO = "Sin comparación"
 BENCH_AMBA = "Total AMBA"
 
@@ -411,6 +450,34 @@ def _clean_label(v) -> str | None:
     return str(v)
 
 
+def point_in_polygon(lat: float, lon: float, geom) -> bool:
+    """Test de punto en polígono (ray casting) para geometrías Polygon y MultiPolygon."""
+    if not geom:
+        return False
+    gtype = geom.get("type")
+    if gtype == "Polygon":
+        polygons = [geom["coordinates"]]
+    elif gtype == "MultiPolygon":
+        polygons = geom["coordinates"]
+    else:
+        return False
+    x, y = float(lon), float(lat)
+    inside = False
+    for polygon in polygons:
+        for ring in polygon:
+            n = len(ring)
+            if n < 3:
+                continue
+            j = n - 1
+            for i in range(n):
+                xi, yi = float(ring[i][0]), float(ring[i][1])
+                xj, yj = float(ring[j][0]), float(ring[j][1])
+                if ((yi > y) != (yj > y)) and (x < (xj - xi) * (y - yi) / (yj - yi) + xi):
+                    inside = not inside
+                j = i
+    return inside
+
+
 def stops_near_route(stops_df: pd.DataFrame, lats, lons, radius_m=OSM_STOP_RADIUS_M) -> pd.DataFrame:
     if stops_df.empty or not lats:
         return stops_df.iloc[0:0]
@@ -463,17 +530,29 @@ def load_geojson(path: str, url: str) -> dict:
     return resp.json()
 
 
+def _download_to_file(path: str, url: str, timeout: int, kind: str = "bin") -> None:
+    """Descarga a disco solo después de validar el contenido (evita archivos parciales)."""
+    resp = requests.get(url, timeout=timeout)
+    resp.raise_for_status()
+    if kind == "json":
+        json.loads(resp.content.decode("utf-8-sig"))
+    elif kind == "csv" and not resp.content.strip():
+        raise ValueError("archivo CSV vacío")
+    with open(path, "wb") as f:
+        f.write(resp.content)
+
+
 @st.cache_data(show_spinner=False)
 def ensure_local_data() -> list:
     messages = []
     os.makedirs(DATA_DIR, exist_ok=True)
     for path, url in DATA_SOURCES:
         if not os.path.exists(path):
-            resp = requests.get(url, timeout=60)
-            resp.raise_for_status()
-            with open(path, "wb") as f:
-                f.write(resp.content)
-            messages.append(f"Descargado {os.path.basename(path)}")
+            try:
+                _download_to_file(path, url, 60, "json")
+                messages.append(f"Descargado {os.path.basename(path)}")
+            except Exception as e:
+                messages.append(f"No se pudo descargar {os.path.basename(path)}: {e}")
 
     for path, url in (
         (SUBE_USOS_2024_FILE, SUBE_USOS_2024_URL),
@@ -483,10 +562,7 @@ def ensure_local_data() -> list:
         if not os.path.exists(path):
             messages.append(f"Descargando {os.path.basename(path)}...")
             try:
-                resp = requests.get(url, timeout=600)
-                resp.raise_for_status()
-                with open(path, "wb") as f:
-                    f.write(resp.content)
+                _download_to_file(path, url, 600, "csv")
                 messages.append(f"Descargado {os.path.basename(path)}")
             except Exception as e:
                 messages.append(f"No se pudo descargar {os.path.basename(path)}: {e}")
@@ -509,10 +585,7 @@ def ensure_local_data() -> list:
         if not os.path.exists(path):
             messages.append(f"Descargando {label}...")
             try:
-                resp = requests.get(url, timeout=600)
-                resp.raise_for_status()
-                with open(path, "wb") as f:
-                    f.write(resp.content)
+                _download_to_file(path, url, 600, "json")
                 messages.append(f"Descargado {os.path.basename(path)}")
             except Exception as e:
                 messages.append(f"No se pudo descargar {label}: {e}")
@@ -713,16 +786,253 @@ def load_ffcc_stations() -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
+# Subte - viajes por molinete (SBASE / BA Data)
+# ---------------------------------------------------------------------------
+MOLINETES_STATION_ALIAS = {
+    "carlos pellegrini": "c. pellegrini",
+    "pellegrini": "c. pellegrini",
+    "avenida de mayo": "av. de mayo",
+    "av de mayo": "av. de mayo",
+    "mariano moreno": "moreno",
+    "scalabrini ortiz": "r.scalabrini ortiz",
+    "pasteur": "pasteur - amia",
+    "malabia": "malabia - osvaldo pugliese",
+    "tronador": "tronador - villa ortuzar",
+    "los incas": "de los incas -pque. chas",
+    "de los incas": "de los incas -pque. chas",
+    "incas": "de los incas -pque. chas",
+    "once": "once - 30 de diciembre",
+    "once 30 de diciembre": "once - 30 de diciembre",
+    "30 de diciembre": "once - 30 de diciembre",
+    "rosas": "juan manuel de rosas",
+    "juan m de rosas": "juan manuel de rosas",
+    "juan manuel de rosas": "juan manuel de rosas",
+    "plaza de los virreyes": "plaza de los virreyes - eva peron",
+    "pza. de los virreyes": "plaza de los virreyes - eva peron",
+    "entre rios": "entre rios - rodolfo walsh",
+    "patricios": "parque patricios",
+    "humberto i": "humberto 1",
+    "flores": "san jose de flores",
+    "plaza miserere": "plaza de miserere",
+    "pza. miserere": "plaza de miserere",
+    "avenida la plata": "av. la plata",
+    "retiro e": "retiro",
+    "retiro c": "retiro",
+    "retiro h": "retiro",
+}
+MOLINETES_IGNORED = {"", "#n/d", "null", "prueba"}
+_MOLINETE_SMALL_WORDS = {"de", "del", "la", "las", "los", "y", "e", "a"}
+
+
+def _molinete_line_letter(linea) -> str:
+    s = str(linea or "").strip()
+    return s[5:] if s.lower().startswith("linea") else s
+
+
+def _decode_molinete(raw: bytes) -> str:
+    for enc in ("utf-8-sig", "latin-1"):
+        try:
+            return raw.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("latin-1", errors="replace")
+
+
+def _title_station(norm_name: str) -> str:
+    parts = norm_name.split()
+    return " ".join(
+        w.capitalize() if (i == 0 or w not in _MOLINETE_SMALL_WORDS) else w
+        for i, w in enumerate(parts)
+    )
+
+
+def _norm_molinete_station(s: str) -> str:
+    return _normalize(s)
+
+
+def _molinete_zip_path(year: int) -> str:
+    return os.path.join(MOLINETES_DIR, f"molinete_{year}.zip")
+
+
+def _download_molinete_zip(year: int) -> str:
+    path = _molinete_zip_path(year)
+    if os.path.exists(path) and os.path.getsize(path) > 100_000:
+        return path
+    url = f"{MOLINETES_CDN}/{MOLINETES_FILES[year]}"
+    os.makedirs(MOLINETES_DIR, exist_ok=True)
+    resp = requests.get(
+        url, timeout=1800, stream=True,
+        headers={"User-Agent": "Mozilla/5.0 (compatible; panel-transporte-caba/1.0)"},
+    )
+    resp.raise_for_status()
+    tmp = path + ".part"
+    with open(tmp, "wb") as fh:
+        for chunk in resp.iter_content(chunk_size=1 << 20):
+            fh.write(chunk)
+    os.replace(tmp, path)
+    return path
+
+
+@st.cache_data(show_spinner=False)
+def _molinetes_geo_names() -> dict:
+    stations = load_subte_stations()
+    mapa = {}
+    for _, r in stations.iterrows():
+        nombre = _clean_label(r["estacion"])
+        if nombre:
+            mapa.setdefault(_normalize(nombre), nombre)
+    return mapa
+
+
+def _canon_molinete_station(s: str, geo_names: dict) -> str:
+    n = _norm_molinete_station(s)
+    if n in MOLINETES_IGNORED:
+        return ""
+    n = MOLINETES_STATION_ALIAS.get(n, n)
+    if n in geo_names:
+        return geo_names[n]
+    m = re.search(r"\.[a-z]$|\s[a-z]$", n)
+    if m:
+        alt = MOLINETES_STATION_ALIAS.get(n[: m.start()], n[: m.start()])
+        if alt in geo_names:
+            return geo_names[alt]
+    return _title_station(n)
+
+
+def _ingest_molinete_zip(year: int, geo_names: dict) -> dict:
+    path = _download_molinete_zip(year)
+    agg = defaultdict(int)
+    with zipfile.ZipFile(path) as z:
+        for name in z.namelist():
+            if not name.lower().endswith(".csv"):
+                continue
+            try:
+                lines = _decode_molinete(z.read(name)).splitlines()
+            except Exception:
+                continue
+            if not lines:
+                continue
+            hdr = lines[0].strip().lstrip('"').rstrip('"')
+            if "pax_TOTAL" not in hdr:
+                continue
+            for line in lines[1:]:
+                s = line.strip()
+                if not s:
+                    continue
+                if s.endswith(";"):
+                    s = s.rstrip(";")
+                if s.startswith('"') and s.endswith('"'):
+                    s = s[1:-1]
+                fields = s.split(";")
+                if len(fields) < 10:
+                    continue
+                estacion = _canon_molinete_station(fields[5], geo_names)
+                if not estacion:
+                    continue
+                try:
+                    fecha = datetime.strptime(fields[0].strip(), "%d/%m/%Y").strftime("%Y-%m-%d")
+                    hora = int(fields[1][:2])
+                    viajes = int(fields[9])
+                except (ValueError, TypeError):
+                    continue
+                agg[(fecha, hora, _molinete_line_letter(fields[3]), estacion)] += viajes
+    return agg
+
+
+def _molinetes_source_token() -> str:
+    return _source_token([_molinete_zip_path(y) for y in sorted(MOLINETES_FILES)])
+
+
+def _molinetes_aggregates_fresh() -> bool:
+    if not (os.path.exists(MOLINETES_AGG_FILE) and os.path.exists(MOLINETES_AGG_META_FILE)):
+        return False
+    try:
+        with open(MOLINETES_AGG_META_FILE, encoding="utf-8") as f:
+            meta = json.load(f)
+    except (ValueError, OSError):
+        return False
+    if meta.get("schema_version", 0) != MOLINETES_AGG_SCHEMA_VERSION:
+        return False
+    src_files = [_molinete_zip_path(y) for y in sorted(MOLINETES_FILES)]
+    if [os.path.basename(p) for p in src_files] != meta.get("fuentes", []):
+        return False
+    if any(not os.path.exists(p) for p in src_files):
+        return False
+    return max(os.path.getmtime(p) for p in src_files) <= meta.get("built_after", 0)
+
+
+def _build_molinetes_aggregates() -> pd.DataFrame:
+    try:
+        geo_names = _molinetes_geo_names()
+    except Exception:
+        geo_names = {}
+    frames = []
+    for year in sorted(MOLINETES_FILES):
+        try:
+            agg = _ingest_molinete_zip(year, geo_names)
+        except Exception as e:
+            st.warning(f"No se pudieron leer los molinetes {year}: {e}")
+            continue
+        if not agg:
+            continue
+        df = pd.DataFrame(agg.items(), columns=["key", "viajes"])
+        df[["fecha", "hora", "linea", "estacion"]] = pd.DataFrame(list(df["key"]), index=df.index)
+        frames.append(df.drop(columns=["key"]))
+    if not frames:
+        return pd.DataFrame(columns=["fecha", "hora", "linea", "estacion", "viajes"])
+    df = pd.concat(frames, ignore_index=True)
+    df["fecha"] = pd.to_datetime(df["fecha"])
+    df = (
+        df.groupby(["fecha", "hora", "linea", "estacion"], as_index=False)["viajes"].sum()
+        .sort_values(["fecha", "hora", "estacion", "linea"])
+        .reset_index(drop=True)
+    )
+    df.to_csv(MOLINETES_AGG_FILE, index=False)
+    src_files = [_molinete_zip_path(y) for y in sorted(MOLINETES_FILES)]
+    meta = {
+        "fuentes": [os.path.basename(p) for p in src_files],
+        "built_after": max(os.path.getmtime(p) for p in src_files if os.path.exists(p)),
+        "schema_version": MOLINETES_AGG_SCHEMA_VERSION,
+        "años": sorted(MOLINETES_FILES),
+    }
+    with open(MOLINETES_AGG_META_FILE, "w", encoding="utf-8") as f:
+        json.dump(meta, f)
+    return df
+
+
+@st.cache_data(show_spinner=False)
+def load_molinetes(token: str) -> pd.DataFrame:
+    if _molinetes_aggregates_fresh():
+        try:
+            df = pd.read_csv(MOLINETES_AGG_FILE, dtype={"linea": str, "estacion": str})
+            df["fecha"] = pd.to_datetime(df["fecha"])
+            return df
+        except Exception:
+            pass
+    return _build_molinetes_aggregates()
+
+
+@st.cache_data(show_spinner=False)
+def load_subte_stations_geo() -> pd.DataFrame:
+    """Una fila por estación única (normalizada) con coordenadas, para el mapa de molinetes."""
+    stations = load_subte_stations()
+    if stations.empty:
+        return pd.DataFrame(columns=["nombre", "linea", "lat", "lon"])
+    rows = {}
+    for _, r in stations.iterrows():
+        nombre = _clean_label(r["estacion"])
+        if not nombre:
+            continue
+        rows.setdefault(_normalize(nombre), [nombre, _clean_label(r["linea"]), r["lat"], r["lon"]])
+    return pd.DataFrame(rows.values(), columns=["nombre", "linea", "lat", "lon"])
+
+
+# ---------------------------------------------------------------------------
 # SUBE - normalizacion y lectura
 # ---------------------------------------------------------------------------
 def _normalize_sube_linea(code) -> str | None:
-    if code is None or pd.isna(code):
-        return None
-    m = re.search(r"(\d+)", str(code))
-    if not m:
-        return None
-    n = int(m.group(1))
-    return f"{n:03d}" if n > 0 else None
+    # Mismo criterio de `_norm_rmba_linea`: primer grupo de dígitos + zfill(3).
+    return _norm_rmba_linea(code)
 
 
 def _is_caba_sube_row(code, jurisdiccion) -> bool:
@@ -736,6 +1046,11 @@ def _is_caba_sube_row(code, jurisdiccion) -> bool:
 
 
 SUBE_SOURCE_FILES = [SUBE_USOS_2024_FILE, SUBE_USOS_2025_FILE, SUBE_USOS_2026_FILE]
+SUBE_AGG_SCHEMA_VERSION = 2
+
+
+def _sube_source_token() -> str:
+    return _source_token(SUBE_SOURCE_FILES)
 
 
 @st.cache_data(show_spinner=False)
@@ -770,12 +1085,7 @@ def _read_sube_daily_all() -> pd.DataFrame:
 
 
 def _sube_source_token() -> str:
-    parts = []
-    for path in SUBE_SOURCE_FILES:
-        parts.append("1" if os.path.exists(path) else "0")
-        if os.path.exists(path):
-            parts.append(f"{os.path.getmtime(path):.0f}")
-    return "|".join(parts)
+    return _source_token(SUBE_SOURCE_FILES)
 
 
 def _sube_aggregates_fresh() -> bool:
@@ -789,6 +1099,8 @@ def _sube_aggregates_fresh() -> bool:
         with open(SUBE_AGG_META_FILE, encoding="utf-8") as f:
             meta = json.load(f)
     except (ValueError, OSError):
+        return False
+    if meta.get("schema_version", 1) != SUBE_AGG_SCHEMA_VERSION:
         return False
     src = list(meta.get("fuentes", []))
     src_files = [os.path.join(DATA_DIR, s) for s in src]
@@ -825,9 +1137,12 @@ def _build_sube_aggregates() -> pd.DataFrame:
     daily = df[["linea", "fecha", "CANTIDAD"]].copy()
     daily_cut = mensual["fecha"].max() - pd.DateOffset(months=11)
     daily = daily[daily["fecha"] >= daily_cut].copy()
-    daily["tipo_dia"] = daily["fecha"].dt.dayofweek.map(
-        {0: "Día hábil", 1: "Día hábil", 2: "Día hábil", 3: "Día hábil", 4: "Día hábil",
-         5: "Sábado", 6: "Domingo"}
+    weekday = daily["fecha"].dt.dayofweek
+    is_feriado = daily["fecha"].dt.strftime("%Y-%m-%d").isin(FERIADOS_ARG)
+    daily["tipo_dia"] = np.where(
+        is_feriado,
+        "Feriado",
+        np.where(weekday < 5, "Día hábil", np.where(weekday == 5, "Sábado", "Domingo")),
     )
     daily = daily.rename(columns={"CANTIDAD": "transacciones"})[["linea", "fecha", "transacciones", "tipo_dia"]]
 
@@ -836,6 +1151,7 @@ def _build_sube_aggregates() -> pd.DataFrame:
     meta = {
         "fuentes": [os.path.basename(p) for p in SUBE_SOURCE_FILES],
         "built_after": max(os.path.getmtime(p) for p in SUBE_SOURCE_FILES if os.path.exists(p)),
+        "schema_version": SUBE_AGG_SCHEMA_VERSION,
     }
     with open(SUBE_AGG_META_FILE, "w", encoding="utf-8") as f:
         json.dump(meta, f)
@@ -928,6 +1244,81 @@ def draw_osm_stops(m, stops_df):
             fill_opacity=0.9,
             tooltip=f"Parada AMBA: {stop_row['name'] or 's/d'}",
         ).add_to(m)
+
+
+def draw_subte_stations(m, df):
+    for _, r in df.iterrows():
+        nombre = r["estacion"]
+        folium.CircleMarker(
+            location=[r["lat"], r["lon"]],
+            radius=4,
+            color="white",
+            weight=1,
+            fill=True,
+            fill_color=_subte_line_color(r["linea"]),
+            fill_opacity=0.9,
+            tooltip=f"{nombre} · Línea {r['linea']}" if nombre else f"Subte Línea {r['linea']}",
+            popup=(
+                folium.Popup(f"<b>Estación {nombre}</b><br>Línea {r['linea']}", max_width=260)
+                if nombre
+                else ""
+            ),
+        ).add_to(m)
+
+
+def draw_ffcc_stations(m, df):
+    for _, r in df.iterrows():
+        nombre = r["nombre"]
+        ramal = f" · {r['ramal']}" if r["ramal"] else ""
+        if nombre:
+            tooltip = f"{nombre} · {r['linea']}"
+            popup_txt = f"<b>Estación {nombre}</b><br>Ferrocarril {r['linea']}{ramal}"
+        else:
+            tooltip = f"Ferrocarril {r['linea']}"
+            popup_txt = f"<b>Ferrocarril {r['linea']}</b>"
+        folium.CircleMarker(
+            location=[r["lat"], r["lon"]],
+            radius=4,
+            color="white",
+            weight=1,
+            fill=True,
+            fill_color=FFCC_COLOR,
+            fill_opacity=0.9,
+            tooltip=tooltip,
+            popup=folium.Popup(popup_txt, max_width=260),
+        ).add_to(m)
+
+
+def routes_to_geojson(routes_df, color_func=None, use_simple=True) -> dict:
+    """Convierte una tabla de rutas en un único FeatureCollection para dibujar
+    miles de recorridos en una sola capa de Folium (mucho más liviano)."""
+    features = []
+    for _, r in routes_df.iterrows():
+        coords = r["coords_simple"] if use_simple else r["coords"]
+        if not coords:
+            continue
+        color = color_func(r) if color_func else "#7f7f7f"
+        properties = {
+            "linea": r["linea"],
+            "ramal": _clean_label(r["recorrido"]),
+            "sentido": r["sentido"],
+            "desde": _clean_label(r["desde"]),
+            "hasta": _clean_label(r["hasta"]),
+            "jurisdiccion": r.get("jurisdiccion"),
+            "color": color,
+        }
+        features.append(
+            {
+                "type": "Feature",
+                "geometry": {"type": "MultiLineString", "coordinates": coords},
+                "properties": properties,
+            }
+        )
+    return {"type": "FeatureCollection", "features": features}
+
+
+def geo_route_style(feature):
+    return {"color": feature["properties"].get("color", "#7f7f7f")}
 
 
 def draw_renabap(m, fc, color=RENABAP_COLOR):
@@ -1100,6 +1491,157 @@ def load_renabap_points() -> pd.DataFrame:
                 for lon, lat in ring:
                     rows.append({"id": b_id, "lat": float(lat), "lon": float(lon)})
     return pd.DataFrame(rows)
+
+
+# ---------------------------------------------------------------------------
+# Redes espaciales: aplanado de coordenadas + grilla de proximidad
+# ---------------------------------------------------------------------------
+# La grilla se construye una sola vez por contenido de datos (token de mtime de
+# archivos fuente) y las consultas reciben argumentos hasheables (str/int), no
+# DataFrames con columnas de listas: evita que st.cache_data haga pickle de las
+# ~440k coordenadas en cada rerun ("unhashable type: 'list'").
+NET_CELL_M = 100.0
+
+
+def _source_token(files) -> str:
+    parts = []
+    for p in files:
+        parts.append("1" if os.path.exists(p) else "0")
+        if os.path.exists(p):
+            parts.append(f"{os.path.getmtime(p):.0f}")
+    return "|".join(parts)
+
+
+def _flatten_network(df) -> tuple:
+    lat, lon, owner = [], [], []
+    for i, row in enumerate(df.itertuples()):
+        for seg in row.coords:
+            if not seg:
+                continue
+            for c in seg:
+                lat.append(float(c[1]))
+                lon.append(float(c[0]))
+                owner.append(i)
+    return (
+        np.asarray(lat, dtype=float),
+        np.asarray(lon, dtype=float),
+        np.asarray(owner, dtype=int),
+    )
+
+
+def route_points_latlon(routes_df) -> tuple:
+    """Aplana las coordenadas de una tabla de rutas en (lats, lons)."""
+    lat, lon, _ = _flatten_network(routes_df)
+    return lat.tolist(), lon.tolist()
+
+
+@st.cache_data(show_spinner=False)
+def bus_network(token: str) -> tuple:
+    routes_df = build_routes_table_amba(load_geojson(ROUTES_FILE, ROUTES_URL), _load_amba_sources())
+    return _flatten_network(routes_df)
+
+
+@st.cache_data(show_spinner=False)
+def subte_network(token: str) -> tuple:
+    return _flatten_network(load_subte_lines())
+
+
+@st.cache_data(show_spinner=False)
+def ffcc_network(token: str) -> tuple:
+    return _flatten_network(load_ffcc_lines())
+
+
+def build_point_grid(lat, lon, cell_m=NET_CELL_M):
+    """Grilla espacial sobre una nube de puntos; devuelve (dict de buckets, meta)."""
+    lat = np.asarray(lat, dtype=float)
+    lon = np.asarray(lon, dtype=float)
+    lat_m = 111_320.0
+    if lat.size == 0:
+        return {}, (lat_m, 0.0, cell_m)
+    lon_m = lat_m * np.cos(np.radians(float(lat.mean())))
+    gi = np.floor(lat * lat_m / cell_m).astype(int)
+    gj = np.floor(lon * lon_m / cell_m).astype(int)
+    grid = {}
+    for i in range(lat.size):
+        grid.setdefault((int(gi[i]), int(gj[i])), []).append(i)
+    return grid, (lat_m, lon_m, cell_m)
+
+
+def _grid_matches(grid, meta, net_lat, net_lon, qlat, qlon, radius_m):
+    """Devuelve (índices de red a <=radius, máscara de puntos query alcanzados)."""
+    lat_m, lon_m, cell_m = meta
+    qlat = np.atleast_1d(np.asarray(qlat, dtype=float))
+    qlon = np.atleast_1d(np.asarray(qlon, dtype=float))
+    nq = qlat.size
+    query_hit = np.zeros(nq, dtype=bool)
+    net_hit = set()
+    if nq == 0 or not grid:
+        return net_hit, query_hit
+    steps = int(np.ceil(radius_m / cell_m)) + 1
+    for k in range(nq):
+        gk_lat = int(qlat[k] * lat_m / cell_m)
+        gk_lon = int(qlon[k] * lon_m / cell_m)
+        hit = False
+        for di in range(-steps, steps + 1):
+            for dj in range(-steps, steps + 1):
+                bucket = grid.get((gk_lat + di, gk_lon + dj))
+                if not bucket:
+                    continue
+                idx = np.asarray(bucket)
+                d = _haversine_np(qlat[k], qlon[k], net_lat[idx], net_lon[idx])
+                m = d <= radius_m
+                if m.any():
+                    net_hit.update(idx[m].tolist())
+                    hit = True
+            if hit:
+                break
+        query_hit[k] = hit
+    return net_hit, query_hit
+
+
+@st.cache_data(show_spinner=False)
+def renabap_covered_ids(show_subte: bool, show_ffcc: bool) -> frozenset:
+    """IDs RE-NABAP con al menos un vértice de frontera a <= RENABAP_RADIUS_M de la red."""
+    ren = load_renabap_points()
+    if ren.empty:
+        return frozenset()
+    lat, lon, _ = bus_network(_source_token(ROUTES_SOURCE_FILES))
+    if show_subte:
+        slat, slon, _ = subte_network(_source_token([SUBTE_LINEAS_FILE]))
+        lat = np.concatenate([lat, slat])
+        lon = np.concatenate([lon, slon])
+    if show_ffcc:
+        flat, flon, _ = ffcc_network(_source_token([FFCC_LINEAS_FILE]))
+        lat = np.concatenate([lat, flat])
+        lon = np.concatenate([lon, flon])
+    if lat.size == 0:
+        return frozenset()
+    grid, meta = build_point_grid(lat, lon)
+    _, query_hit = _grid_matches(grid, meta, lat, lon, ren["lat"], ren["lon"], RENABAP_RADIUS_M)
+    return frozenset(int(v) for v in np.asarray(ren["id"])[query_hit])
+
+
+@st.cache_data(show_spinner=False)
+def lines_near_barrio(bar_id: int, radius_m: int, network: str) -> tuple:
+    """Índices de línea (row en la df del modo) a <= radius_m de la frontera del barrio."""
+    ren = load_renabap_points()
+    bpts = ren[ren["id"] == bar_id]
+    if bpts.empty:
+        return ()
+    if network == "bus":
+        lat, lon, owner = bus_network(_source_token(ROUTES_SOURCE_FILES))
+    elif network == "subte":
+        lat, lon, owner = subte_network(_source_token([SUBTE_LINEAS_FILE]))
+    elif network == "ffcc":
+        lat, lon, owner = ffcc_network(_source_token([FFCC_LINEAS_FILE]))
+    else:
+        return ()
+    if lat.size == 0:
+        return ()
+    grid, meta = build_point_grid(lat, lon)
+    hits, _ = _grid_matches(grid, meta, lat, lon, bpts["lat"], bpts["lon"], radius_m)
+    owners = {int(o) for o in owner[np.asarray(sorted(hits), dtype=int)]}
+    return tuple(sorted(owners))
 
 
 @st.cache_data(show_spinner=False)

@@ -1,0 +1,12 @@
+services:
+  transporte:
+    build: .
+    container_name: transporte-caba
+    ports:
+      - "8501:8501"
+    volumes:
+      - transporte-data:/app/data
+    restart: unless-stopped
+
+volumes:
+  transporte-data:

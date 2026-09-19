@@ -4,6 +4,7 @@ import pandas as pd
 import altair as alt
 import streamlit as st
 import folium
+from folium.features import GeoJsonTooltip, GeoJsonPopup
 from streamlit_folium import st_folium
 
 from data_loaders import (
@@ -25,11 +26,14 @@ from data_loaders import (
     build_routes_table_amba,
     comuna_demand_table,
     stops_near_route,
+    route_points_latlon,
     route_colors,
     draw_route,
     draw_osm_stops,
     draw_renabap,
-    _index_series,
+    draw_subte_stations,
+    draw_ffcc_stations,
+    routes_to_geojson,
     _metric_box_html,
     _delta_pill_html,
     THEME_CSS,
@@ -48,11 +52,13 @@ from data_loaders import (
     SEL_LINEA,
     VISTA_MENSUAL,
     VISTA_DIA,
-    BENCH_NINGUNO,
-    BENCH_AMBA,
+    VISTA_SEMANA,
     _fmt,
     _fmt_dec,
 )
+
+DIA_SEMANA_ORDER = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
+DIA_SEMANA_MAP = {0: "Lunes", 1: "Martes", 2: "Miércoles", 3: "Jueves", 4: "Viernes", 5: "Sábado", 6: "Domingo"}
 
 st.set_page_config(
     page_title="Transporte CABA - Transporte Público",
@@ -86,13 +92,15 @@ if os.path.exists(SUBE_MONTHLY_FILE) or any(os.path.exists(p) for p in SUBE_SOUR
 col_sel, col_info = st.columns([1, 3])
 
 with col_sel:
-    ambito = st.radio("Ámbito", ["AMBA", "CABA"], horizontal=True, key="ambito_sel")
-    active_routes = (
-        routes_df[routes_df["jurisdiccion"] == "CABA"].reset_index(drop=True)
-        if ambito == "CABA"
-        else routes_df
+    JUR_OPTS = ["CABA", "NACIONAL", "PROVINCIAL", "MUNICIPAL"]
+    jurs = st.multiselect(
+        "Jurisdicciones",
+        JUR_OPTS,
+        default=JUR_OPTS,
+        key="jur_sel",
     )
-    routes_df = active_routes
+    st.caption("La demanda SUBE es siempre AMBA completa; este filtro aplica a recorridos y paradas.")
+    routes_df = routes_df[routes_df["jurisdiccion"].isin(jurs)].reset_index(drop=True)
     lineas = sorted(set(routes_df["linea"]) | stop_lineas, key=int)
 
     linea = st.selectbox(
@@ -111,7 +119,6 @@ with col_sel:
     show_osm_stops = False
     show_demanda_comuna = False
     vista = VISTA_MENSUAL
-    benchmark = BENCH_NINGUNO
     if real_linea:
         line_recorridos = sorted(
             routes_df[routes_df["linea"] == linea]["recorrido"].dropna().unique(),
@@ -132,24 +139,24 @@ with col_sel:
         if not sube_all.empty:
             vista = st.selectbox(
                 "Vista de demanda",
-                [VISTA_MENSUAL, VISTA_DIA],
+                [VISTA_MENSUAL, VISTA_DIA, VISTA_SEMANA],
                 key="vista_sel",
             )
-            if vista == VISTA_MENSUAL:
-                top_lines = (
-                    sube_all.groupby("linea")["transacciones"].sum()
-                    .sort_values(ascending=False).head(20)
-                )
-                bench_opts = [BENCH_NINGUNO, BENCH_AMBA] + [f"Línea {l}" for l in top_lines.index]
-                benchmark = st.selectbox("Comparar evolución con", bench_opts, key="bench_sel")
     elif linea == "Todas las líneas":
         show_demanda_comuna = st.checkbox("Demanda estimada por comuna (CABA)", value=False)
 
+if not jurs:
+    st.warning("Seleccioná al menos una jurisdicción para ver recorridos.")
+
+if "last_jur" in st.session_state and st.session_state["last_jur"] != jurs:
+    for key in ("last_linea", "recorrido_sel", "sentido_sel", "vista_sel"):
+        st.session_state.pop(key, None)
 if "last_linea" in st.session_state and st.session_state["last_linea"] != linea:
-    for key in ("recorrido_sel", "sentido_sel", "vista_sel", "bench_sel"):
+    for key in ("recorrido_sel", "sentido_sel", "vista_sel"):
         st.session_state.pop(key, None)
 if real_linea:
     st.session_state["last_linea"] = linea
+st.session_state["last_jur"] = jurs
 
 if real_linea:
     line_routes = routes_df[routes_df["linea"] == linea]
@@ -158,7 +165,7 @@ if real_linea:
     if sentido != "Ambos":
         line_routes = line_routes[line_routes["sentido"] == sentido]
     n_paradas = len(stops_df[stops_df["linea"] == linea])
-    osm_force = ambito == "AMBA" and n_paradas == 0
+    osm_force = n_paradas == 0
 else:
     n_paradas = 0
     osm_force = False
@@ -167,23 +174,23 @@ osm_match = pd.DataFrame()
 if real_linea and (show_osm_stops or osm_force):
     with st.spinner("Filtrando paradas AMBA (OSM)..."):
         osm_stops_all = load_osm_stops()
-        lats, lons = [], []
-        for _, route_row in line_routes.iterrows():
-            for segment in route_row["coords"]:
-                lats.extend(float(c[1]) for c in segment)
-                lons.extend(float(c[0]) for c in segment)
+        lats, lons = route_points_latlon(line_routes)
         osm_match = stops_near_route(osm_stops_all, lats, lons)
 
 line_sube = pd.DataFrame()
 line_sube_daily = pd.DataFrame()
 if real_linea:
     line_sube = sube_all[sube_all["linea"] == linea]
-    if vista == VISTA_DIA and not sube_all.empty:
+    if vista in (VISTA_DIA, VISTA_SEMANA) and not sube_all.empty:
         line_sube_daily = load_sube_daily(sube_token)
         line_sube_daily = line_sube_daily[line_sube_daily["linea"] == linea]
 
 with col_info:
     if real_linea:
+        if line_routes.empty:
+            st.warning(
+                "La línea seleccionada no tiene recorridos para la jurisdicción elegida."
+            )
         total_km = line_routes["longitud_m"].sum() / 1000.0
         caption = (
             f"{n_paradas} paradas (CABA), "
@@ -298,7 +305,7 @@ with col_info:
             f"{len(stops_df)} paradas y {len(routes_df)} recorridos "
             f"para {len(lineas)} líneas ({total_km:,.0f} km acumulados ida+vuelta)."
         )
-        if ambito == "AMBA":
+        if not routes_df.empty:
             cnt = routes_df.groupby("jurisdiccion").size()
             detalle = ", ".join(
                 f"{cnt.get(j, 0)} {j.lower()}" for j in ("CABA", "NACIONAL", "PROVINCIAL", "MUNICIPAL")
@@ -312,20 +319,38 @@ m = folium.Map(location=[-34.6037, -58.3816], zoom_start=12)
 
 comuna_demanda = pd.DataFrame()
 if linea == "Todas las líneas":
-    for _, route_row in routes_df.iterrows():
-        color = JUR_COLOR.get(route_row.get("jurisdiccion"), "#7f7f7f")
-        if route_row.get("jurisdiccion") in (None, "CABA"):
-            color, _ = route_colors(LINE_COLORS.get(route_row["linea"]))
-        draw_route(
-            m,
-            route_row["coords_simple"],
-            color,
-            None,
-            weight=2,
-            opacity=0.45,
-        )
+    def _todos_color(r):
+        jur = r.get("jurisdiccion")
+        if jur in (None, "CABA"):
+            color, _ = route_colors(LINE_COLORS.get(r["linea"]))
+            return color
+        return JUR_COLOR.get(jur, "#7f7f7f")
 
-    if ambito == "AMBA":
+    folium.GeoJson(
+        routes_to_geojson(routes_df, color_func=_todos_color),
+        style_function=lambda f: {
+            "color": f["properties"].get("color", "#7f7f7f"),
+            "weight": 2,
+            "opacity": 0.45,
+        },
+        tooltip=GeoJsonTooltip(
+            fields=["linea", "ramal", "sentido"],
+            aliases=["Línea", "Recorrido", "Sentido"],
+            localize=True,
+        ),
+        name="Recorridos (Todas las líneas)",
+    ).add_to(m)
+
+    if not routes_df.empty:
+        mlats, mlons = route_points_latlon(routes_df)
+        if mlats:
+            m.fit_bounds(
+                [[min(mlats), min(mlons)], [max(mlats), max(mlons)]],
+                padding=(20, 20),
+            )
+        else:
+            m.fit_bounds(AMBA_BUS_BOUNDS, padding=(0, 0))
+    else:
         m.fit_bounds(AMBA_BUS_BOUNDS, padding=(0, 0))
 
     if show_demanda_comuna:
@@ -386,11 +411,7 @@ elif real_linea:
     if (show_osm_stops or osm_force) and not osm_match.empty:
         draw_osm_stops(m, osm_match)
 
-    lats, lons = [], []
-    for _, route_row in line_routes.iterrows():
-        for segment in route_row["coords"]:
-            lats.extend(float(c[1]) for c in segment)
-            lons.extend(float(c[0]) for c in segment)
+    lats, lons = route_points_latlon(line_routes)
     if lats:
         m.fit_bounds(
             [[min(lats), min(lons)], [max(lats), max(lons)]],
@@ -415,20 +436,7 @@ if show_subte:
             m, r["coords"], subte_color, None,
             weight=2.5, opacity=0.75, tooltip=f"Subte - Línea {r['label']}",
         )
-    for _, r in subte_stations.iterrows():
-        folium.CircleMarker(
-            location=[r["lat"], r["lon"]],
-            radius=4,
-            color="white",
-            fill=True,
-            fill_color=_subte_line_color(r["linea"]),
-            fill_opacity=0.9,
-            tooltip=f"{r['estacion']} · Línea {r['linea']}" if r["estacion"] else f"Subte Línea {r['linea']}",
-            popup=folium.Popup(
-                f"<b>{r['estacion']}</b><br>Línea {r['linea']}",
-                max_width=220,
-            ) if r["estacion"] else "",
-        ).add_to(m)
+    draw_subte_stations(m, subte_stations)
 
 if show_ffcc:
     with st.spinner("Dibujando red ferroviaria..."):
@@ -442,20 +450,7 @@ if show_ffcc:
             m, r["coords"], FFCC_COLOR, None,
             weight=2.5, opacity=0.75, tooltip=label,
         )
-    for _, r in ffcc_stations.iterrows():
-        folium.CircleMarker(
-            location=[r["lat"], r["lon"]],
-            radius=4,
-            color="white",
-            fill=True,
-            fill_color=FFCC_COLOR,
-            fill_opacity=0.9,
-            tooltip=f"{r['nombre']} · {r['linea']}" if r["nombre"] else f"Ferrocarril {r['linea']}",
-            popup=folium.Popup(
-                f"<b>{r['nombre']}</b><br>Línea {r['linea']}",
-                max_width=220,
-            ) if r["nombre"] else "",
-        ).add_to(m)
+    draw_ffcc_stations(m, ffcc_stations)
 
 st_folium(m, width="100%", height=650, returned_objects=[])
 
@@ -465,110 +460,137 @@ if real_linea:
     else:
         color, _ = route_colors(LINE_COLORS.get(linea))
 
-        if vista == VISTA_DIA:
+        if vista in (VISTA_DIA, VISTA_SEMANA):
             if line_sube_daily.empty:
                 st.info(f"No hay desagregación diaria para la línea {linea}.")
             else:
-                st.subheader(f"Usos por tipo de día - Línea {linea}")
-                tipo_labels = ["Día hábil", "Sábado", "Domingo"]
-                daily_avg = (
-                    line_sube_daily.groupby("tipo_dia", as_index=False)["transacciones"].mean()
-                )
-                daily_avg["tipo_dia"] = pd.Categorical(
-                    daily_avg["tipo_dia"], categories=tipo_labels, ordered=True
-                )
-                bar = (
-                    alt.Chart(daily_avg)
-                    .mark_bar(color=color, size=70)
-                    .encode(
-                        x=alt.X("tipo_dia:N", title="Tipo de día", sort=tipo_labels),
-                        y=alt.Y("transacciones:Q", title="Usos promedio por día"),
-                        tooltip=[
-                            alt.Tooltip("tipo_dia:N", title="Tipo de día"),
-                            alt.Tooltip("transacciones:Q", title="Usos/día", format="~s"),
-                        ],
+                if vista == VISTA_DIA:
+                    st.subheader(f"Usos por tipo de día - Línea {linea}")
+                    tipo_labels = ["Día hábil", "Sábado", "Domingo", "Feriado"]
+                    daily_avg = (
+                        line_sube_daily.groupby("tipo_dia", as_index=False)["transacciones"].mean()
                     )
-                    .properties(height=340)
-                )
-                st.altair_chart(bar, width="stretch")
-                st.caption(
-                    f"Promedio de transacciones SUBE diarias por tipo de día "
-                    f"(AMBA, últimos 12 meses completos), de {line_sube_daily['fecha'].min():%d/%m/%Y} "
-                    f"a {line_sube_daily['fecha'].max():%d/%m/%Y}."
-                )
-        else:
-            st.subheader(f"Transacciones SUBE - Línea {linea}")
-            sube_12 = line_sube.tail(12)
-            window_min = sube_12["fecha"].min()
-            window_max = sube_12["fecha"].max()
-
-            bench_series = None
-            bench_label = None
-            if benchmark != BENCH_NINGUNO:
-                if benchmark == BENCH_AMBA:
-                    bench_series = sube_all.groupby("fecha", as_index=False)["transacciones"].sum()
-                    bench_label = "Total AMBA"
+                    daily_avg["tipo_dia"] = pd.Categorical(
+                        daily_avg["tipo_dia"], categories=tipo_labels, ordered=True
+                    )
+                    bar = (
+                        alt.Chart(daily_avg)
+                        .mark_bar(color=color, size=70)
+                        .encode(
+                            x=alt.X("tipo_dia:N", title="Tipo de día", sort=tipo_labels),
+                            y=alt.Y("transacciones:Q", title="Usos promedio por día"),
+                            tooltip=[
+                                alt.Tooltip("tipo_dia:N", title="Tipo de día"),
+                                alt.Tooltip("transacciones:Q", title="Usos/día", format="~s"),
+                            ],
+                        )
+                        .properties(height=340)
+                    )
+                    st.altair_chart(bar, width="stretch")
+                    st.caption(
+                        f"Promedio de transacciones SUBE diarias por tipo de día "
+                        f"(AMBA, últimos 12 meses completos, feriados nacionales excluidos de los días hábiles), "
+                        f"de {line_sube_daily['fecha'].min():%d/%m/%Y} a {line_sube_daily['fecha'].max():%d/%m/%Y}."
+                    )
                 else:
-                    bench_code = benchmark.split()[-1]
-                    if bench_code != linea:
-                        bench_series = sube_all[sube_all["linea"] == bench_code][["fecha", "transacciones"]]
-                        bench_label = f"Línea {bench_code}"
-                if bench_series is not None:
-                    bench_series = bench_series[
-                        (bench_series["fecha"] >= window_min) & (bench_series["fecha"] <= window_max)
-                    ]
-                    if bench_series.empty:
-                        bench_series = None
+                    st.subheader(f"Semana tipo - Línea {linea}")
+                    daily_avg = line_sube_daily.copy()
+                    daily_avg["dia"] = daily_avg["fecha"].dt.dayofweek.map(DIA_SEMANA_MAP)
+                    daily_avg = daily_avg.groupby("dia", as_index=False)["transacciones"].mean()
+                    daily_avg["dia"] = pd.Categorical(
+                        daily_avg["dia"], categories=DIA_SEMANA_ORDER, ordered=True
+                    )
+                    bar = (
+                        alt.Chart(daily_avg)
+                        .mark_bar(color=color, size=60)
+                        .encode(
+                            x=alt.X("dia:N", title="Día de la semana", sort=DIA_SEMANA_ORDER),
+                            y=alt.Y("transacciones:Q", title="Usos promedio por día"),
+                            tooltip=[
+                                alt.Tooltip("dia:N", title="Día"),
+                                alt.Tooltip("transacciones:Q", title="Usos/día", format="~s"),
+                            ],
+                        )
+                        .properties(height=340)
+                    )
+                    st.altair_chart(bar, width="stretch")
+                    st.caption(
+                        f"Promedio diario por día de la semana (AMBA, últimos 12 meses completos), "
+                        f"de {line_sube_daily['fecha'].min():%d/%m/%Y} a {line_sube_daily['fecha'].max():%d/%m/%Y}."
+                    )
 
-            if bench_series is not None and len(bench_series) > 1:
-                d_line = _index_series(sube_12[["fecha", "transacciones"]])
-                d_bench = _index_series(bench_series[["fecha", "transacciones"]])
-                c_line = (
-                    alt.Chart(d_line)
-                    .mark_line(color=color, point=alt.OverlayMarkDef(color=color, filled=True, size=70, strokeWidth=0))
-                    .encode(
-                        x=alt.X("fecha:T", title="Mes", axis=alt.Axis(format="%m/%Y", grid=True)),
-                        y=alt.Y("idx:Q", title="Índice (base = 100 en el primer mes)"),
-                        tooltip=[
-                            alt.Tooltip("fecha:T", title="Mes"),
-                            alt.Tooltip("transacciones:Q", title=f"Usos {linea}", format="~s"),
-                        ],
-                    )
-                )
-                c_bench = (
-                    alt.Chart(d_bench)
-                    .mark_line(color="#9aa7bd", opacity=0.8, strokeDash=[5, 4])
-                    .encode(
-                        x=alt.X("fecha:T", title="Mes"),
-                        y=alt.Y("idx:Q", title="Índice (base = 100)"),
-                        tooltip=[
-                            alt.Tooltip("fecha:T", title="Mes"),
-                            alt.Tooltip("transacciones:Q", title=f"Usos {bench_label}", format="~s"),
-                        ],
-                    )
-                )
-                chart = alt.layer(c_line, c_bench).resolve_scale(y="shared")
-                st.altair_chart(chart, width="stretch")
-                st.caption(
-                    f"Evolución indexada (base 100 = primer mes): Línea {linea} vs {bench_label}. "
-                    f"Ambas curvas parten del mismo valor para comparar el ritmo de crecimiento."
-                )
-            else:
-                point = alt.OverlayMarkDef(color=color, filled=True, size=80, strokeWidth=0)
-                chart = (
-                    alt.Chart(sube_12[["fecha", "transacciones"]].copy())
-                    .mark_line(color=color, point=point)
-                    .encode(
-                        x=alt.X("fecha:T", title="Mes", axis=alt.Axis(format="%m/%Y", grid=True)),
-                        y=alt.Y("transacciones:Q", title="Transacciones", axis=alt.Axis(format="~s")),
-                    )
-                )
-                st.altair_chart(chart, width="stretch")
-                st.caption(
-                    f"Fuente: Secretaría de Transporte (datos.transporte.gob.ar) - "
-                    f"transacciones SUBE (usos) por fecha. Usos diarios agregados por mes "
-                    f"(AMBA), de {window_min:%m/%Y} a {window_max:%m/%Y}."
-                )
+if not sube_all.empty:
+    st.subheader("Ranking de productividad AMBA")
+    rk = st.columns(3)
+    with rk[0]:
+        top_n = st.selectbox("Mostrar", ["10", "20", "50", "Todas"], index=1, key="rank_topn")
+    with rk[1]:
+        sort_by = st.selectbox(
+            "Ordenar por",
+            ["usos por km", "usos por día", "usos 12m", "Δ vs año anterior"],
+            key="rank_sort",
+        )
+    with rk[2]:
+        jur_opts = ["CABA", "NACIONAL", "PROVINCIAL", "MUNICIPAL"]
+        rk_jurs = st.multiselect("Jurisdicción", jur_opts, default=jur_opts, key="rank_jur")
+
+    sube12 = sube_all[sube_all["fecha"] >= sube_all["fecha"].max() - pd.DateOffset(months=11)]
+    min12 = sube12["fecha"].min()
+    prev = sube_all[(sube_all["fecha"] >= min12 - pd.DateOffset(months=12)) & (sube_all["fecha"] < min12)]
+    cur = sube12.groupby("linea", as_index=False)["transacciones"].sum().rename(columns={"transacciones": "usos_12m"})
+    prv = prev.groupby("linea", as_index=False)["transacciones"].sum().rename(columns={"transacciones": "usos_prev"})
+    km = routes_df.groupby("linea", as_index=False)["longitud_m"].sum().rename(columns={"longitud_m": "km"})
+    km["km"] = km["km"] / 1000.0
+    jur = routes_df.drop_duplicates("linea")[["linea", "jurisdiccion"]]
+    rk_df = cur.merge(prv, on="linea", how="left").merge(km, on="linea").merge(jur, on="linea")
+    rk_df = rk_df[rk_df["km"] > 0].copy()
+    rk_df["usos_dia"] = rk_df["usos_12m"] / 365.0
+    rk_df["usos_km"] = rk_df["usos_12m"] / rk_df["km"]
+    rk_df["var_aa"] = np.where(
+        rk_df["usos_prev"] > 0,
+        100.0 * (rk_df["usos_12m"] - rk_df["usos_prev"]) / rk_df["usos_prev"],
+        np.nan,
+    )
+    rk_df = rk_df[rk_df["jurisdiccion"].isin(rk_jurs)]
+    if rk_df.empty:
+        st.warning("No hay líneas con datos para los filtros elegidos.")
+    else:
+        sort_map = {
+            "usos por km": "usos_km",
+            "usos por día": "usos_dia",
+            "usos 12m": "usos_12m",
+            "Δ vs año anterior": "var_aa",
+        }
+        rk_df = rk_df.sort_values(sort_map[sort_by], ascending=False, na_position="last")
+        if top_n != "Todas":
+            rk_df = rk_df.head(int(top_n)).copy()
+        rk_df.insert(0, "puesto", range(1, len(rk_df) + 1))
+        disp = rk_df[["puesto", "linea", "jurisdiccion", "km", "usos_12m", "usos_dia", "usos_km", "var_aa"]].copy()
+        disp.columns = ["#", "Línea", "Jurisdicción", "Km (ida+vuelta)", "Usos 12m", "Usos/día", "Usos/km (anual)", "Δ vs año ant. (%)"]
+        disp["Usos/día"] = disp["Usos/día"].round().astype(int)
+        disp["Usos/km (anual)"] = disp["Usos/km (anual)"].round(1)
+        disp["Δ vs año ant. (%)"] = disp["Δ vs año ant. (%)"].round(1)
+        fmt_cols = {
+            "Km (ida+vuelta)": "{:.0f}",
+            "Usos 12m": "{:,.0f}",
+            "Usos/día": "{:,.0f}",
+            "Usos/km (anual)": "{:,.1f}",
+            "Δ vs año ant. (%)": "{:,.1f}",
+        }
+        st.dataframe(disp.style.format(fmt_cols), width="stretch", hide_index=True)
+        csv_rank = disp.to_csv(index=False).encode("utf-8-sig")
+        st.download_button(
+            "Descargar ranking (CSV)",
+            data=csv_rank,
+            file_name="ranking_productividad_amba.csv",
+            mime="text/csv",
+        )
+        st.caption(
+            "Usos 12m: transacciones SUBE (AMBA) de los últimos 12 meses completos. "
+            "Usos/día: promedio diario del período (total/365). Usos/km: productividad anual por kilómetro "
+            "ida+vuelta (suma de los recorridos de la línea). Δ vs año anterior: variación del total 12m "
+            "contra los 12 meses previos."
+        )
 
 with st.expander("Sobre los datos"):
     st.markdown(
@@ -591,14 +613,14 @@ with st.expander("Sobre los datos"):
         "(usos diarios por línea en AMBA, agregados mensualmente). "
         "Los recorridos se colorean según la librea definida por línea (colores cargados "
         "manualmente); el sentido se indica en el tooltip de "
-        "cada trazo. En el modo AMBA, los recorridos provinciales y municipales se "
+        "cada trazo. Los recorridos provinciales y municipales se "
         "dibujan en un color propio (verde/naranja) y el azul identifica "
         "jurisdicción nacional/CABA."
     )
     st.markdown(
         "**Métricas e interpretación:** *usos* son transbordos de tarjeta SUBE (una validación por "
-        "uso, incluye transbordos, no incluye pago en efectivo). La serie es AMBA completo aunque la "
-        "línea se elija como CABA. Las métricas de demanda NO están ajustadas por cantidad de "
+        "uso, incluye transbordos, no incluye pago en efectivo). La serie es AMBA completo "
+        "independientemente del filtro de jurisdicciones. Las métricas de demanda NO están ajustadas por cantidad de "
         "colectivos ni por estacionalidad. "
         "**Usos por km** = total de usos de los últimos 12 meses dividido la longitud del recorrido "
         "seleccionado (ida + vuelta); es una proxy de productividad por corredor. "

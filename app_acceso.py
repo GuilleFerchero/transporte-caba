@@ -20,9 +20,17 @@ from data_loaders import (
     _load_renabap_geojson,
     _subte_line_color,
     build_routes_table_amba,
-    _haversine_np,
+    point_in_polygon,
+    renabap_covered_ids,
+    lines_near_barrio,
+    _sube_source_token,
+    load_sube_transactions,
     draw_route,
+    draw_subte_stations,
+    draw_ffcc_stations,
+    routes_to_geojson,
     route_colors,
+    _metric_box_html,
     THEME_CSS,
     STOPS_FILE,
     STOPS_URL,
@@ -33,7 +41,8 @@ from data_loaders import (
     JUR_COLOR,
     FFCC_COLOR,
     LINE_COLORS,
-    BASE_COLORS,
+    SUBE_MONTHLY_FILE,
+    SUBE_SOURCE_FILES,
     _fmt,
     _fmt_dec,
 )
@@ -56,122 +65,6 @@ st.subheader("Cobertura de la red de transporte (colectivo, subte y ferrocarril)
 
 
 @st.cache_data(show_spinner=False)
-def _network_coords(routes_df, show_subte, show_ffcc):
-    lats, lons = [], []
-    for _, route_row in routes_df.iterrows():
-        for segment in route_row["coords"]:
-            lats.extend(float(c[1]) for c in segment)
-            lons.extend(float(c[0]) for c in segment)
-    if show_subte:
-        for _, r in load_subte_lines().iterrows():
-            for segment in r["coords"]:
-                lats.extend(float(c[1]) for c in segment)
-                lons.extend(float(c[0]) for c in segment)
-    if show_ffcc:
-        for _, r in load_ffcc_lines().iterrows():
-            for segment in r["coords"]:
-                lats.extend(float(c[1]) for c in segment)
-                lons.extend(float(c[0]) for c in segment)
-    return lats, lons
-
-
-@st.cache_data(show_spinner=False)
-def _covered_ids(routes_df, show_subte, show_ffcc) -> set:
-    ren_points = load_renabap_points()
-    lats, lons = _network_coords(routes_df, show_subte, show_ffcc)
-    if not lats or ren_points.empty:
-        return set()
-    return _grid_near_ids(lats, lons, ren_points, RENABAP_RADIUS_M)
-
-
-def _grid_near_ids(route_lats, route_lons, ren_df, radius_m) -> set:
-    rp = np.column_stack([np.asarray(route_lats, dtype=float),
-                          np.asarray(route_lons, dtype=float)])
-    if rp.size == 0:
-        return set()
-    lat_m = 111_320.0
-    lon_m = lat_m * np.cos(np.radians(float(np.mean(rp[:, 0]))))
-    cell_m = radius_m / 2.0
-    glat = np.floor(rp[:, 0] * lat_m / cell_m).astype(int)
-    glon = np.floor(rp[:, 1] * lon_m / cell_m).astype(int)
-    grid = {}
-    for i in range(len(rp)):
-        grid.setdefault((int(glat[i]), int(glon[i])), []).append(i)
-    r_lat = ren_df["lat"].to_numpy(dtype=float)
-    r_lon = ren_df["lon"].to_numpy(dtype=float)
-    r_ids = ren_df["id"].to_numpy()
-    steps = 3
-    covered = set()
-    for k in range(len(ren_df)):
-        gk_lat = int(r_lat[k] * lat_m / cell_m)
-        gk_lon = int(r_lon[k] * lon_m / cell_m)
-        best = np.inf
-        for di in range(-steps, steps + 1):
-            for dj in range(-steps, steps + 1):
-                bucket = grid.get((gk_lat + di, gk_lon + dj))
-                if not bucket:
-                    continue
-                idx = np.asarray(bucket)
-                d = _haversine_np(r_lat[k], r_lon[k], rp[idx, 0], rp[idx, 1])
-                best = min(best, float(d.min()))
-                if best <= radius_m:
-                    break
-            if best <= radius_m:
-                break
-        if best <= radius_m:
-            covered.add(int(r_ids[k]))
-    return covered
-
-
-@st.cache_data(show_spinner=False)
-def _lines_near_barrio(lines_df, bar_id, radius_m) -> tuple:
-    if "coords" not in lines_df.columns:
-        return ()
-    ren_points = load_renabap_points()
-    bpts = ren_points[ren_points["id"] == bar_id]
-    if bpts.empty:
-        return ()
-    b_lat = bpts["lat"].to_numpy(dtype=float)
-    b_lon = bpts["lon"].to_numpy(dtype=float)
-    lat_m = 111_320.0
-    lon_m = lat_m * np.cos(np.radians(float(b_lat.mean())))
-    cell_m = radius_m / 2.0
-    rl, rln, ridx = [], [], []
-    for i, row in lines_df.iterrows():
-        for seg in row["coords"]:
-            for c in seg:
-                rl.append(float(c[1]))
-                rln.append(float(c[0]))
-                ridx.append(i)
-    if not rl:
-        return ()
-    rl = np.asarray(rl, dtype=float)
-    rln = np.asarray(rln, dtype=float)
-    ridx = np.asarray(ridx, dtype=int)
-    glat = np.floor(rl * lat_m / cell_m).astype(int)
-    glon = np.floor(rln * lon_m / cell_m).astype(int)
-    grid = {}
-    for i in range(len(rl)):
-        grid.setdefault((int(glat[i]), int(glon[i])), []).append(i)
-    steps = 3
-    found = set()
-    for k in range(len(bpts)):
-        gk_lat = int(b_lat[k] * lat_m / cell_m)
-        gk_lon = int(b_lon[k] * lon_m / cell_m)
-        for di in range(-steps, steps + 1):
-            for dj in range(-steps, steps + 1):
-                bucket = grid.get((gk_lat + di, gk_lon + dj))
-                if not bucket:
-                    continue
-                idx = np.asarray(bucket)
-                d = _haversine_np(b_lat[k], b_lon[k], rl[idx], rln[idx])
-                m = d <= radius_m
-                if m.any():
-                    found.update(ridx[idx[m]].astype(int).tolist())
-    return tuple(sorted(found))
-
-
-@st.cache_data(show_spinner=False)
 def _barrio_bounds(bar_id):
     ren_points = load_renabap_points()
     bpts = ren_points[ren_points["id"] == bar_id]
@@ -183,29 +76,9 @@ def _barrio_bounds(bar_id):
     ]
 
 
-def _point_in_multi_polygon(lat, lon, geom) -> bool:
-    if geom.get("type") != "MultiPolygon":
-        return False
-    x, y = float(lon), float(lat)
-    inside = False
-    for polygon in geom["coordinates"]:
-        for ring in polygon:
-            n = len(ring)
-            if n < 3:
-                continue
-            j = n - 1
-            for i in range(n):
-                xi, yi = float(ring[i][0]), float(ring[i][1])
-                xj, yj = float(ring[j][0]), float(ring[j][1])
-                if ((yi > y) != (yj > y)) and (x < (xj - xi) * (y - yi) / (yj - yi) + xi):
-                    inside = not inside
-                j = i
-    return inside
-
-
 def _find_barrio_at(lat, lon, fc) -> int | None:
     for feature in fc["features"]:
-        if _point_in_multi_polygon(lat, lon, feature["geometry"]):
+        if point_in_polygon(lat, lon, feature["geometry"]):
             id_renabap = feature["properties"].get("id_renabap")
             if id_renabap is not None:
                 return int(id_renabap)
@@ -222,6 +95,14 @@ def _renabap_fc_with_estado(covered: frozenset):
         eid = feature["properties"].get("id_renabap")
         feature["properties"]["estado"] = "con cobertura" if eid in covered else "sin cobertura"
     return out
+
+
+def _bus_color(r):
+    jur = r.get("jurisdiccion")
+    if jur in (None, "CABA"):
+        color, _ = route_colors(LINE_COLORS.get(r["linea"]))
+        return color
+    return JUR_COLOR.get(jur, "#7f7f7f")
 
 
 data_messages = ensure_local_data()
@@ -282,7 +163,7 @@ with st.sidebar:
     )
 
 with st.spinner("Midiendo cobertura de la red..."):
-    covered = _covered_ids(routes_df, show_subte, show_ffcc)
+    covered = renabap_covered_ids(show_subte, show_ffcc)
     ren_centroids = load_renabap_centroids().copy()
 
 ren_centroids["cobertura"] = ren_centroids["id"].astype(int).isin(covered)
@@ -304,30 +185,38 @@ pct = 100.0 * con_cobertura / total_barrios if total_barrios else 0.0
 k1, k2, k3, k4 = st.columns(4)
 with k1:
     st.markdown(
-        f'<div class="metric-box"><div class="mb-label">Barrios con cobertura</div>'
-        f'<div class="mb-value">{_fmt(con_cobertura)}<small>/ {_fmt(total_barrios)}</small></div>'
-        f'<div class="mb-sub"><span>a ≤ {RENABAP_RADIUS_M} m de alguna red</span></div></div>',
+        _metric_box_html(
+            "Barrios con cobertura",
+            f"{_fmt(con_cobertura)}<small>/ {_fmt(total_barrios)}</small>",
+            f'<span>a ≤ {RENABAP_RADIUS_M} m de alguna red</span>',
+        ),
         unsafe_allow_html=True,
     )
 with k2:
     st.markdown(
-        f'<div class="metric-box"><div class="mb-label">Barrios sin cobertura</div>'
-        f'<div class="mb-value" style="color:{NO_COBERTO_COLOR};">{_fmt(sin_cobertura)}</div>'
-        f'<div class="mb-sub"><span>lejos de toda la red considerada</span></div></div>',
+        _metric_box_html(
+            "Barrios sin cobertura",
+            f'<span style="color:{NO_COBERTO_COLOR};">{_fmt(sin_cobertura)}</span>',
+            '<span>lejos de toda la red considerada</span>',
+        ),
         unsafe_allow_html=True,
     )
 with k3:
     st.markdown(
-        f'<div class="metric-box"><div class="mb-label">Familias con cobertura</div>'
-        f'<div class="mb-value">{_fmt(familias_cubiertas)}<small>fam.</small></div>'
-        f'<div class="mb-sub"><span>~ {_fmt(familias_cubiertas * 4)} personas (×4)</span></div></div>',
+        _metric_box_html(
+            "Familias con cobertura",
+            f"{_fmt(familias_cubiertas)}<small>fam.</small>",
+            f'<span>~ {_fmt(familias_cubiertas * 4)} personas (×4)</span>',
+        ),
         unsafe_allow_html=True,
     )
 with k4:
     st.markdown(
-        f'<div class="metric-box"><div class="mb-label">% del AMBA conectado</div>'
-        f'<div class="mb-value">{_fmt_dec(pct)}<small>%</small></div>'
-        f'<div class="mb-sub"><span>de los barrios populares analizados</span></div></div>',
+        _metric_box_html(
+            "% del AMBA conectado",
+            f"{_fmt_dec(pct)}<small>%</small>",
+            '<span>de los barrios populares analizados</span>',
+        ),
         unsafe_allow_html=True,
     )
 
@@ -354,9 +243,9 @@ near_subte_idx = None
 near_ffcc_idx = None
 if barrio_sel != "Todos":
     bar_id = barrio_labels[barrio_sel]
-    bus_routes = routes_df.iloc[np.asarray(_lines_near_barrio(routes_df, bar_id, BARRIO_BUS_RADIUS_M))]
-    near_subte_idx = set(_lines_near_barrio(load_subte_lines(), bar_id, BARRIO_RAIL_RADIUS_M))
-    near_ffcc_idx = set(_lines_near_barrio(load_ffcc_lines(), bar_id, BARRIO_RAIL_RADIUS_M))
+    bus_routes = routes_df.iloc[np.asarray(lines_near_barrio(bar_id, BARRIO_BUS_RADIUS_M, "bus"))]
+    near_subte_idx = set(lines_near_barrio(bar_id, BARRIO_RAIL_RADIUS_M, "subte"))
+    near_ffcc_idx = set(lines_near_barrio(bar_id, BARRIO_RAIL_RADIUS_M, "ffcc"))
 elif show_bus:
     bus_routes = routes_df
 
@@ -399,26 +288,27 @@ if renabap_fc is not None:
 bus_weight = 2.5 if bar_id is not None else 1.5
 bus_opacity = 0.85 if bar_id is not None else 0.4
 
-for _, route_row in bus_routes.iterrows():
-    color = JUR_COLOR.get(route_row.get("jurisdiccion"), "#7f7f7f")
-    if route_row.get("jurisdiccion") in (None, "CABA"):
-        color, _ = route_colors(LINE_COLORS.get(route_row["linea"]))
-    ramal = route_row.get("recorrido")
-    ramal = ramal if ramal not in (None, "", "s/d") else "s/d"
-    sentido = route_row.get("sentido") or "s/d"
-    popup_html = f"<b>Línea {route_row['linea']}</b> · Ramal {ramal}<br>Sentido: {sentido}"
-    if route_row.get("desde") and route_row.get("hasta"):
-        popup_html += f"<br>{route_row['desde']} → {route_row['hasta']}"
-    draw_route(
-        m,
-        route_row["coords_simple"],
-        color,
-        None,
-        weight=bus_weight,
-        opacity=bus_opacity,
-        tooltip=f"Línea {route_row['linea']} · Ramal {ramal} · {sentido}",
-        popup=popup_html,
-    )
+if not bus_routes.empty:
+    folium.GeoJson(
+        routes_to_geojson(bus_routes, color_func=_bus_color),
+        style_function=lambda f: {
+            "color": f["properties"].get("color", "#7f7f7f"),
+            "weight": bus_weight,
+            "opacity": bus_opacity,
+        },
+        tooltip=GeoJsonTooltip(
+            fields=["linea", "ramal", "sentido"],
+            aliases=["Línea", "Ramal", "Sentido"],
+            localize=True,
+        ),
+        popup=GeoJsonPopup(
+            fields=["linea", "ramal", "sentido", "desde", "hasta"],
+            aliases=["Línea", "Ramal", "Sentido", "Desde", "Hasta"],
+            localize=True,
+            style="font-size:12px;",
+        ),
+        name="Recorridos de colectivo",
+    ).add_to(m)
 
 if show_subte:
     subte_lines = load_subte_lines()
@@ -433,21 +323,7 @@ if show_subte:
             weight=3, opacity=0.85, tooltip=f"Subte - Línea {r['label']}",
             popup=f"<b>Subte - Línea {r['label']}</b>",
         )
-    for _, r in subte_stations.iterrows():
-        folium.CircleMarker(
-            location=[r["lat"], r["lon"]],
-            radius=4,
-            color="white",
-            weight=1,
-            fill=True,
-            fill_color=_subte_line_color(r["linea"]),
-            fill_opacity=0.9,
-            tooltip=f"{r['estacion']} · Línea {r['linea']}" if r["estacion"] else f"Subte Línea {r['linea']}",
-            popup=folium.Popup(
-                f"<b>Estación {r['estacion']}</b><br>Subte - Línea {r['linea']}",
-                max_width=260,
-            ),
-        ).add_to(m)
+    draw_subte_stations(m, subte_stations)
 
 if show_ffcc:
     ffcc_lines = load_ffcc_lines()
@@ -465,22 +341,7 @@ if show_ffcc:
             weight=3, opacity=0.85, tooltip=label,
             popup=f"<b>{label}</b>",
         )
-    for _, r in ffcc_stations.iterrows():
-        folium.CircleMarker(
-            location=[r["lat"], r["lon"]],
-            radius=4,
-            color="white",
-            weight=1,
-            fill=True,
-            fill_color=FFCC_COLOR,
-            fill_opacity=0.9,
-            tooltip=f"{r['nombre']} · {r['linea']}" if r["nombre"] else f"Ferrocarril {r['linea']}",
-            popup=folium.Popup(
-                f"<b>Estación {r['nombre']}</b><br>Ferrocarril {r['linea']}"
-                f"{' · ' + r['ramal'] if r['ramal'] else ''}",
-                max_width=260,
-            ),
-        ).add_to(m)
+    draw_ffcc_stations(m, ffcc_stations)
 
 if bar_id is not None:
     bb = _barrio_bounds(bar_id)
@@ -514,6 +375,46 @@ st.markdown(
 )
 
 st_folium(m, width="100%", height=650, returned_objects=["last_object_clicked", "last_clicked"], key="acceso_map")
+
+if bar_id is not None:
+    sube_ok = os.path.exists(SUBE_MONTHLY_FILE) or any(os.path.exists(p) for p in SUBE_SOURCE_FILES)
+    if sube_ok:
+        with st.spinner("Cruzando demanda SUBE de las líneas cercanas..."):
+            sube = load_sube_transactions(_sube_source_token())
+            near_lineas = list(dict.fromkeys(bus_routes["linea"]))
+            sube_near = sube[sube["linea"].isin(near_lineas)] if not sube.empty else pd.DataFrame(columns=["linea", "fecha", "transacciones"])
+        if not sube_near.empty:
+            last12 = sube_near[sube_near["fecha"] >= sube_near["fecha"].max() - pd.DateOffset(months=11)]
+            total_usos = int(last12["transacciones"].sum())
+            usos_dia = total_usos / 365.0
+            st.markdown(
+                _metric_box_html(
+                    "Demanda de las líneas a ≤ 500 m",
+                    f"{_fmt(total_usos)}<small>usos/12m</small>",
+                    f'<span>≈ {_fmt(usos_dia)} usos/día · {len(near_lineas)} línea(s)</span>',
+                ),
+                unsafe_allow_html=True,
+            )
+            top = (
+                last12.groupby("linea", as_index=False)["transacciones"].sum()
+                .sort_values("transacciones", ascending=False).head(10)
+                .rename(columns={"linea": "Línea", "transacciones": "Usos (12m)"})
+            )
+            with st.expander(f"Usos SUBE por línea cerca de {barrio_sel}"):
+                st.dataframe(top, width="stretch", hide_index=True)
+                csv_top = top.to_csv(index=False).encode("utf-8-sig")
+                st.download_button(
+                    "Descargar usos por línea (CSV)",
+                    data=csv_top,
+                    file_name=f"usos_lineas_{bar_id}.csv",
+                    mime="text/csv",
+                )
+            st.caption(
+                "La demanda corresponde a las líneas que bordean el barrio (proxy de accesibilidad efectiva), "
+                "no a viajes originados en el barrio: es el total AMBA de cada línea."
+            )
+        else:
+            st.info("No hay datos SUBE para las líneas que pasan cerca del barrio seleccionado.")
 
 st.subheader("Resumen por partido / comuna")
 resumen = (
@@ -549,7 +450,8 @@ with st.expander("Sobre los datos y la metodología"):
         "aproximadas). Colectivos: [BA Data](https://data.buenosaires.gob.ar) (recorridos y paradas, CC-BY-2.5-AR) + "
         "[Recorridos RMBA](https://datos.transporte.gob.ar/dataset/recorridos-de-lineas-de-transporte-rmba-jn) "
         "(Secretaría de Transporte: nacionales, provinciales y municipales). Subte y ferrocarril: datasets RMBA + "
-        "[estaciones de ferrocarril de BA Data](https://data.buenosaires.gob.ar/dataset/juqdkmgo-102)."
+        "[estaciones de ferrocarril de BA Data](https://data.buenosaires.gob.ar/dataset/juqdkmgo-102). "
+        "Demanda: transacciones SUBE por línea (Secretaría de Transporte)."
     )
     st.markdown(
         "**Metodología:** se considera que un barrio popular tiene *cobertura* cuando algún **vértice de la "
@@ -562,6 +464,8 @@ with st.expander("Sobre los datos y la metodología"):
     st.markdown(
         "**Nota:** esta app mide *proximidad espacial a la red*, no tiempo de viaje ni frecuencia de servicio. "
         "Un barrio puede quedar cerca de una línea y aun así tener mala conexión al centro de la ciudad. "
+        "La *demanda de las líneas a ≤ 500 m* es la suma de los usos SUBE (AMBA) de esas líneas, "
+        "un proxy de cuánto transporte circula al borde del barrio. "
         "En una próxima etapa se podrán agregar corredores hacia destinos clave (microcentro, intercambiadores) "
         "y tiempos de viaje."
     )
