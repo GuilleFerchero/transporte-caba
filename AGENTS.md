@@ -9,6 +9,15 @@ y la Secretaría de Transporte (RMBA).
 
 ## Estado actual
 
+- **Bundle precomputado `data_bundle/`**: los datos derivados que usan las apps
+  se generan con `build_data_bundle.py` y se commitean al repo (~7 MB, parquet
+  zstd + geojson gzip). Como Streamlit Cloud clona el repo, las apps arrancan
+  **sin descargar las ~420 MB de fuentes crudas por sesión** (era el motivo por el
+  que Cloud se colgaba en cada cold start). Los loaders son *bundle-first*:
+  si `data_bundle/bundle_meta.json` existe con el `schema_version` correcto no se
+  descargan SUBE crudo ni zips de molinetes ni geojsons RMBA; si falta o el schema
+  cambia, fallback al flujo clásico (`data/` local o descarga). Ver
+  "Arquitectura de datos" y "Detalles técnicos".
 - **Tres apps separadas** comparten un módulo de datos común:
   - `app_transporte.py` → análisis de **transporte público** (recorridos, paradas,
     demanda SUBE, subte, ferrocarril). Es el `app.py` histórico refactorizado.
@@ -189,6 +198,23 @@ y la Secretaría de Transporte (RMBA).
     baja vía CDN si el ZIP de un año no existe localmente), `data/molinetes_subte.csv`
     (**agregado por hora/estación**, ~48 MB, `linea, fecha, hora, estacion, viajes`) y
     `data/molinetes_agg_meta.json` (sidecar `built_after`/`schema_version`).
+- **Bundle precomputado `data_bundle/`** (versionado en git, ~7 MB, START
+  liviano en Cloud): generado con `build_data_bundle.py` usando los mismos
+  builders de `data_loaders.py` (no duplica lógica). Contiene:
+  - `routes.parquet` (1274 recorridos AMBA completos con `coords`/`coords_simple`/
+    `longitud_m`/`jurisdiccion`, zstd), `stops.parquet` (11.461 filas)
+  - `sube_mensual.parquet` + `sube_diario.parquet` (agregados SUBE ya listos)
+  - `molinetes.parquet` (agregado por hora/estación, 1.457.749 filas → 2,4 MB
+    en vez de 206 MB de zips)
+  - `subte_lines/subte_stations/ffcc_lines/ffcc_stations.parquet`
+  - `comunas.geojson.gz` y `renabap_amba.geojson.gz` (leyenda con `gzip`)
+  - `bundle_meta.json` con `schema_version` (`BUNDLE_SCHEMA_VERSION = 1`).
+  Los loaders leen el bundle con `_read_parquet_bundle()` (que convierte las
+  columnas de geometría a listas Python planas; pyarrow las devuelve como
+  `ndarray` anidado y eso rompía `if not coords`/`_flatten_network`). Si no hay
+  bundle o el schema cambió, las funciones degradan al flujo clásico.
+  Para refrescar: `venv\Scripts\python build_data_bundle.py` → commitear
+  `data_bundle/` (los `data/` crudos NO se commitean).
 - `ensure_local_data()` crea `data/` y, si falta algún archivo, lo descarga de BA Data
   (las fuentes AMBA —RMBA, subte/ferro— son tolerantes: si fallan, la app degrada a CABA).
 - `load_geojson(path, url)` lee el archivo local con `utf-8-sig` (tolera BOM, ej. comunas);
@@ -244,6 +270,16 @@ y la Secretaría de Transporte (RMBA).
   Streamlit re-ejecute el script. Se corrigió con `returned_objects=[]` en la
   llamada `st_folium(m, width="100%", height=650, returned_objects=[])`.
   (Commiteado en `4e4013a`.)
+- **Loaders bundle-first**: `load_routes_df`/`load_stops_df`/`load_sube_*`/
+  `load_molinetes`/subte-ffcc/`load_comunas`/`_load_renabap_geojson` leen
+  `data_bundle/` (`_read_parquet_bundle` + `bundle_available()`) y solo caen al
+  flujo crudo si no hay bundle o el schema cambió. Los tokens de caché
+  (`_data_token`) usan el `mtime` de `bundle_meta.json` cuando hay bundle (si no,
+  los `mtime` de los fuentes), así un bundle nuevo invalidan la caché aunque los
+  `data/` crudos no existan en Cloud. `bus_network` construye su red con
+  `load_routes_df()`. Parques a cuidar: pyarrow devuelve las columnas de geometría
+  como `ndarray` anidados (rompía `if not coords`/`_flatten_network`); se
+  convierten a listas Python con `_deep_python`.
 - Normalización de líneas en SUBE nacional: los códigos son inconsistentes entre
   años y jurisdicciones. Regla usada en `_is_caba_sube_row()`: códigos con prefijo
   `CABA`/`BSAS_LINEA`/`BS_ASLINEA` → siempre CABA; los `LINEA N` pelados solo si
@@ -314,7 +350,9 @@ streamlit run app_subte.py        # Viajes del Subte por molinete (SBASE)
   at.run()
   print(at.exception)  # debe ser vacío
   ```
-- Verificar sintaxis: `python -m py_compile data_loaders.py app_transporte.py app_acceso.py app_subte.py`
+- Verificar sintaxis: `python -m py_compile data_loaders.py app_transporte.py app_acceso.py app_subte.py build_data_bundle.py`
+- Refrescar datos: `venv\Scripts\python build_data_bundle.py` (regenera `data_bundle/`
+  desde los `data/` crudos) y luego `git add data_bundle/` + commit.
 
 ## Git / GitHub
 
@@ -366,14 +404,16 @@ streamlit run app_subte.py        # Viajes del Subte por molinete (SBASE)
   candidatos**: `app_transporte.py` (transporte público), `app_acceso.py`
   (acceso a la ciudad) y `app_subte.py` (subte por molinete), cada uno como una
   app separada del mismo repo.
-  `requirements.txt` fija las versiones del entorno; el primer
-  render de cada sesión descarga ~190 MB de datos (los CSVs de SUBE y GeoJSON) y
-  el free tier suspende la app por inactividad (almacenamiento efímero).
+  `requirements.txt` fija las versiones del entorno (incluye `pyarrow`, necesario
+  para leer los parquet del bundle). Con `data_bundle/` commiteado el primer render
+  de cada sesión **no descarga nada**: los ~7 MB ya viajan clonados del repo; el
+  free tier sigue suspendiendo la app por inactividad (almacenamiento efímero).
 - **Docker (alternativa a Cloud)**: ya hay `Dockerfile` (python:3.12-slim +
   `requirements.txt` + healthcheck + `CMD streamlit run app_transporte.py
   --server.address=0.0.0.0`) y `docker-compose.yml` que monta el volumen nombrado
   `transporte-data:/app/data` (los datos se descargan **una sola vez** y el arranque
-  queda en segundos, sin límites de memoria ni suspensión por inactividad). Correr
+  queda en segundos, sin límites de memoria ni suspensión por inactividad). Con el
+  bundle commiteado el arranque es instantáneo aunque el volumen esté vacío. Correr
   con `docker compose up -d --build` y apuntar a `http://localhost:8501`. Para cambio
   de app, editar el `CMD` del Dockerfile (entrypoints: `app_transporte.py` /
   `app_acceso.py`).

@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "built_at": "2026-09-20T13:35:03+00:00",
+  "files": {
+    "routes.parquet": 3.25,
+    "stops.parquet": 0.214,
+    "sube_mensual.parquet": 0.038,
+    "sube_diario.parquet": 0.383,
+    "molinetes.parquet": 2.365,
+    "subte_lines.parquet": 0.01,
+    "subte_stations.parquet": 0.005,
+    "ffcc_lines.parquet": 0.075,
+    "ffcc_stations.parquet": 0.01,
+    "comunas.geojson.gz": 0.177,
+    "renabap_amba.geojson.gz": 0.363
+  }
+}

@@ -1,3 +1,4 @@
+import gzip
 import os
 import re
 import io
@@ -76,6 +77,73 @@ SUBE_DAILY_FILE = os.path.join(DATA_DIR, "sube_usos_diarios.csv")
 SUBE_AGG_META_FILE = os.path.join(DATA_DIR, "sube_agregados_meta.json")
 
 ROUTES_SOURCE_FILES = [ROUTES_FILE, RMBA_NACIONAL_FILE, RMBA_PROVINCIAL_FILE, RMBA_MUNICIPAL_FILE]
+
+# ---------------------------------------------------------------------------
+# Bundle precomputado (data_bundle/) - datos derivados para deploy liviano
+# ---------------------------------------------------------------------------
+# Generado con build_data_bundle.py y commiteado al repo: Streamlit Cloud clona
+# el repo, asi las apps arrancan SIN descargar las ~420 MB de fuentes crudas.
+# Si data_bundle/ no existe o el schema no coincide, se usa el flujo clasico.
+BUNDLE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data_bundle")
+BUNDLE_META_FILE = os.path.join(BUNDLE_DIR, "bundle_meta.json")
+BUNDLE_SCHEMA_VERSION = 1
+
+BUNDLE_ROUTES_FILE = os.path.join(BUNDLE_DIR, "routes.parquet")
+BUNDLE_STOPS_FILE = os.path.join(BUNDLE_DIR, "stops.parquet")
+BUNDLE_SUBE_MENSUAL_FILE = os.path.join(BUNDLE_DIR, "sube_mensual.parquet")
+BUNDLE_SUBE_DIARIO_FILE = os.path.join(BUNDLE_DIR, "sube_diario.parquet")
+BUNDLE_MOLINETES_FILE = os.path.join(BUNDLE_DIR, "molinetes.parquet")
+BUNDLE_SUBTE_LINES_FILE = os.path.join(BUNDLE_DIR, "subte_lines.parquet")
+BUNDLE_SUBTE_STATIONS_FILE = os.path.join(BUNDLE_DIR, "subte_stations.parquet")
+BUNDLE_FFCC_LINES_FILE = os.path.join(BUNDLE_DIR, "ffcc_lines.parquet")
+BUNDLE_FFCC_STATIONS_FILE = os.path.join(BUNDLE_DIR, "ffcc_stations.parquet")
+BUNDLE_COMUNAS_FILE = os.path.join(BUNDLE_DIR, "comunas.geojson.gz")
+BUNDLE_RENABAP_FILE = os.path.join(BUNDLE_DIR, "renabap_amba.geojson.gz")
+
+
+def bundle_available() -> bool:
+    """True si hay un bundle precomputado valido (evita descargar fuentes crudas)."""
+    try:
+        with open(BUNDLE_META_FILE, encoding="utf-8") as f:
+            meta = json.load(f)
+    except (OSError, ValueError):
+        return False
+    return meta.get("schema_version") == BUNDLE_SCHEMA_VERSION
+
+
+def _bundle_token() -> str:
+    if not bundle_available():
+        return ""
+    try:
+        return f"bundle:{os.path.getmtime(BUNDLE_META_FILE):.0f}"
+    except OSError:
+        return ""
+
+
+def _deep_python(v):
+    """Convierte recursivamente ndarrays/valores numpy a tipos Python planos."""
+    if isinstance(v, list):
+        return [_deep_python(x) for x in v]
+    if isinstance(v, np.ndarray):
+        return _deep_python(v.tolist())
+    if isinstance(v, np.generic):
+        return v.item()
+    return v
+
+
+def _read_parquet_bundle(path) -> pd.DataFrame | None:
+    """Lee un parquet del bundle si esta disponible; las columnas de geometria
+    vuelven a listas planas de Python (pyarrow las devuelve como ndarray)."""
+    if not bundle_available():
+        return None
+    try:
+        df = pd.read_parquet(path)
+        for col in ("coords", "coords_simple"):
+            if col in df.columns:
+                df[col] = df[col].map(_deep_python)
+        return df
+    except Exception:
+        return None
 
 # ---------------------------------------------------------------------------
 # Fuentes de datos
@@ -545,6 +613,8 @@ def _download_to_file(path: str, url: str, timeout: int, kind: str = "bin") -> N
 @st.cache_data(show_spinner=False)
 def ensure_local_data() -> list:
     messages = []
+    if bundle_available():
+        return ["Datos precomputados de data_bundle/ (sin descargas de fuentes crudas)."]
     os.makedirs(DATA_DIR, exist_ok=True)
     for path, url in DATA_SOURCES:
         if not os.path.exists(path):
@@ -687,6 +757,25 @@ def build_routes_table_amba(routes_fc: dict, rmba_sources) -> pd.DataFrame:
     return pd.concat([base, extra], ignore_index=True)
 
 
+@st.cache_data(show_spinner=False)
+def load_stops_df() -> pd.DataFrame:
+    """Tabla de paradas (formato largo por linea). Bundle-first, fallback raw."""
+    df = _read_parquet_bundle(BUNDLE_STOPS_FILE)
+    if df is not None:
+        return df
+    return build_stops_table(load_geojson(STOPS_FILE, STOPS_URL))
+
+
+@st.cache_data(show_spinner=False)
+def load_routes_df() -> pd.DataFrame:
+    """Tabla de recorridos AMBA completos (BA Data + RMBA). Bundle-first."""
+    df = _read_parquet_bundle(BUNDLE_ROUTES_FILE)
+    if df is not None:
+        return df
+    routes_fc = load_geojson(ROUTES_FILE, ROUTES_URL)
+    return build_routes_table_amba(routes_fc, _load_amba_sources())
+
+
 # ---------------------------------------------------------------------------
 # Subte / ferrocarril
 # ---------------------------------------------------------------------------
@@ -763,24 +852,36 @@ def _empty_lines_df():
 
 @st.cache_data(show_spinner=False)
 def load_subte_lines() -> pd.DataFrame:
+    df = _read_parquet_bundle(BUNDLE_SUBTE_LINES_FILE)
+    if df is not None:
+        return df
     fc = _load_geojson_safe(SUBTE_LINEAS_FILE, SUBTE_LINEAS_URL, "líneas de subte")
     return build_subte_lines_df(fc) if fc else _empty_lines_df()
 
 
 @st.cache_data(show_spinner=False)
 def load_subte_stations() -> pd.DataFrame:
+    df = _read_parquet_bundle(BUNDLE_SUBTE_STATIONS_FILE)
+    if df is not None:
+        return df
     fc = _load_geojson_safe(SUBTE_ESTACIONES_FILE, SUBTE_ESTACIONES_URL, "estaciones de subte")
     return build_subte_stations_df(fc) if fc else pd.DataFrame(columns=["estacion", "linea", "lat", "lon"])
 
 
 @st.cache_data(show_spinner=False)
 def load_ffcc_lines() -> pd.DataFrame:
+    df = _read_parquet_bundle(BUNDLE_FFCC_LINES_FILE)
+    if df is not None:
+        return df
     fc = _load_geojson_safe(FFCC_LINEAS_FILE, FFCC_LINEAS_URL, "líneas de ferrocarril")
     return build_ffcc_lines_df(fc) if fc else pd.DataFrame(columns=["linea", "descrip", "coords"])
 
 
 @st.cache_data(show_spinner=False)
 def load_ffcc_stations() -> pd.DataFrame:
+    df = _read_parquet_bundle(BUNDLE_FFCC_STATIONS_FILE)
+    if df is not None:
+        return df
     fc = _load_geojson_safe(FFCC_ESTACIONES_FILE, FFCC_ESTACIONES_URL, "estaciones de ferrocarril")
     return build_ffcc_stations_df(fc) if fc else pd.DataFrame(columns=["nombre", "linea", "ramal", "lat", "lon"])
 
@@ -940,7 +1041,7 @@ def _ingest_molinete_zip(year: int, geo_names: dict) -> dict:
 
 
 def _molinetes_source_token() -> str:
-    return _source_token([_molinete_zip_path(y) for y in sorted(MOLINETES_FILES)])
+    return _data_token([_molinete_zip_path(y) for y in sorted(MOLINETES_FILES)])
 
 
 def _molinetes_aggregates_fresh() -> bool:
@@ -1002,6 +1103,10 @@ def _build_molinetes_aggregates() -> pd.DataFrame:
 
 @st.cache_data(show_spinner=False)
 def load_molinetes(token: str) -> pd.DataFrame:
+    df = _read_parquet_bundle(BUNDLE_MOLINETES_FILE)
+    if df is not None:
+        df["fecha"] = pd.to_datetime(df["fecha"])
+        return df
     if _molinetes_aggregates_fresh():
         try:
             df = pd.read_csv(MOLINETES_AGG_FILE, dtype={"linea": str, "estacion": str})
@@ -1050,7 +1155,7 @@ SUBE_AGG_SCHEMA_VERSION = 2
 
 
 def _sube_source_token() -> str:
-    return _source_token(SUBE_SOURCE_FILES)
+    return _data_token(SUBE_SOURCE_FILES)
 
 
 @st.cache_data(show_spinner=False)
@@ -1082,10 +1187,6 @@ def _read_sube_daily_all() -> pd.DataFrame:
     if not frames:
         return pd.DataFrame(columns=["linea", "fecha", "CANTIDAD"])
     return pd.concat(frames, ignore_index=True)
-
-
-def _sube_source_token() -> str:
-    return _source_token(SUBE_SOURCE_FILES)
 
 
 def _sube_aggregates_fresh() -> bool:
@@ -1160,6 +1261,10 @@ def _build_sube_aggregates() -> pd.DataFrame:
 
 @st.cache_data(show_spinner=False)
 def load_sube_transactions(token: str) -> pd.DataFrame:
+    df = _read_parquet_bundle(BUNDLE_SUBE_MENSUAL_FILE)
+    if df is not None:
+        df["fecha"] = pd.to_datetime(df["fecha"]).dt.to_period("M").dt.to_timestamp()
+        return df[["linea", "fecha", "transacciones"]].sort_values(["linea", "fecha"]).reset_index(drop=True)
     if _sube_aggregates_fresh():
         try:
             df = pd.read_csv(SUBE_MONTHLY_FILE, dtype={"linea": str})
@@ -1172,6 +1277,9 @@ def load_sube_transactions(token: str) -> pd.DataFrame:
 
 @st.cache_data(show_spinner=False)
 def load_sube_daily(token: str) -> pd.DataFrame:
+    df = _read_parquet_bundle(BUNDLE_SUBE_DIARIO_FILE)
+    if df is not None:
+        return df.sort_values(["linea", "fecha"]).reset_index(drop=True)
     if not _sube_aggregates_fresh():
         _build_sube_aggregates()
     if not os.path.exists(SUBE_DAILY_FILE):
@@ -1432,6 +1540,12 @@ def load_osm_stops() -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 @st.cache_data(show_spinner=False)
 def _load_renabap_geojson():
+    if bundle_available() and os.path.exists(BUNDLE_RENABAP_FILE):
+        try:
+            with gzip.open(BUNDLE_RENABAP_FILE, "rt", encoding="utf-8-sig") as f:
+                return json.load(f)
+        except Exception:
+            pass
     try:
         return load_geojson(RENABAP_AMBA_FILE, RENABAP_AMBA_URL)
     except Exception:
@@ -1512,6 +1626,11 @@ def _source_token(files) -> str:
     return "|".join(parts)
 
 
+def _data_token(files) -> str:
+    """Token de cache: bundle si esta disponible, si no mtimes de los fuentes."""
+    return _bundle_token() or _source_token(files)
+
+
 def _flatten_network(df) -> tuple:
     lat, lon, owner = [], [], []
     for i, row in enumerate(df.itertuples()):
@@ -1537,7 +1656,7 @@ def route_points_latlon(routes_df) -> tuple:
 
 @st.cache_data(show_spinner=False)
 def bus_network(token: str) -> tuple:
-    routes_df = build_routes_table_amba(load_geojson(ROUTES_FILE, ROUTES_URL), _load_amba_sources())
+    routes_df = load_routes_df()
     return _flatten_network(routes_df)
 
 
@@ -1605,13 +1724,13 @@ def renabap_covered_ids(show_subte: bool, show_ffcc: bool) -> frozenset:
     ren = load_renabap_points()
     if ren.empty:
         return frozenset()
-    lat, lon, _ = bus_network(_source_token(ROUTES_SOURCE_FILES))
+    lat, lon, _ = bus_network(_data_token(ROUTES_SOURCE_FILES))
     if show_subte:
-        slat, slon, _ = subte_network(_source_token([SUBTE_LINEAS_FILE]))
+        slat, slon, _ = subte_network(_data_token([SUBTE_LINEAS_FILE]))
         lat = np.concatenate([lat, slat])
         lon = np.concatenate([lon, slon])
     if show_ffcc:
-        flat, flon, _ = ffcc_network(_source_token([FFCC_LINEAS_FILE]))
+        flat, flon, _ = ffcc_network(_data_token([FFCC_LINEAS_FILE]))
         lat = np.concatenate([lat, flat])
         lon = np.concatenate([lon, flon])
     if lat.size == 0:
@@ -1629,11 +1748,11 @@ def lines_near_barrio(bar_id: int, radius_m: int, network: str) -> tuple:
     if bpts.empty:
         return ()
     if network == "bus":
-        lat, lon, owner = bus_network(_source_token(ROUTES_SOURCE_FILES))
+        lat, lon, owner = bus_network(_data_token(ROUTES_SOURCE_FILES))
     elif network == "subte":
-        lat, lon, owner = subte_network(_source_token([SUBTE_LINEAS_FILE]))
+        lat, lon, owner = subte_network(_data_token([SUBTE_LINEAS_FILE]))
     elif network == "ffcc":
-        lat, lon, owner = ffcc_network(_source_token([FFCC_LINEAS_FILE]))
+        lat, lon, owner = ffcc_network(_data_token([FFCC_LINEAS_FILE]))
     else:
         return ()
     if lat.size == 0:
@@ -1646,6 +1765,12 @@ def lines_near_barrio(bar_id: int, radius_m: int, network: str) -> tuple:
 
 @st.cache_data(show_spinner=False)
 def load_comunas() -> dict:
+    if bundle_available() and os.path.exists(BUNDLE_COMUNAS_FILE):
+        try:
+            with gzip.open(BUNDLE_COMUNAS_FILE, "rt", encoding="utf-8-sig") as f:
+                return json.load(f)
+        except Exception:
+            pass
     return load_geojson(COMUNAS_FILE, COMUNAS_URL)
 
 

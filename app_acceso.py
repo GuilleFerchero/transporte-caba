@@ -9,17 +9,15 @@ from folium.features import GeoJsonTooltip, GeoJsonPopup
 
 from data_loaders import (
     ensure_local_data,
-    load_geojson,
+    load_routes_df,
     load_subte_lines,
     load_subte_stations,
     load_ffcc_lines,
     load_ffcc_stations,
     load_renabap_points,
     load_renabap_centroids,
-    _load_amba_sources,
     _load_renabap_geojson,
     _subte_line_color,
-    build_routes_table_amba,
     point_in_polygon,
     renabap_covered_ids,
     lines_near_barrio,
@@ -32,10 +30,6 @@ from data_loaders import (
     route_colors,
     _metric_box_html,
     THEME_CSS,
-    STOPS_FILE,
-    STOPS_URL,
-    ROUTES_FILE,
-    ROUTES_URL,
     AMBA_BUS_BOUNDS,
     RENABAP_RADIUS_M,
     JUR_COLOR,
@@ -110,9 +104,7 @@ for message in data_messages:
     st.caption(message)
 
 with st.spinner("Cargando datos..."):
-    stops_fc = load_geojson(STOPS_FILE, STOPS_URL)
-    routes_fc = load_geojson(ROUTES_FILE, ROUTES_URL)
-    routes_df = build_routes_table_amba(routes_fc, _load_amba_sources())
+    routes_df = load_routes_df()
 
 with st.sidebar:
     st.markdown("### Redes consideradas")

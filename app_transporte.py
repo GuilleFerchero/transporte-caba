@@ -9,7 +9,8 @@ from streamlit_folium import st_folium
 
 from data_loaders import (
     ensure_local_data,
-    load_geojson,
+    load_stops_df,
+    load_routes_df,
     load_osm_stops,
     load_subte_lines,
     load_subte_stations,
@@ -18,12 +19,9 @@ from data_loaders import (
     load_comunas,
     load_sube_transactions,
     load_sube_daily,
-    _load_amba_sources,
     _load_renabap_geojson,
     _sube_source_token,
     _subte_line_color,
-    build_stops_table,
-    build_routes_table_amba,
     comuna_demand_table,
     stops_near_route,
     route_points_latlon,
@@ -37,10 +35,6 @@ from data_loaders import (
     _metric_box_html,
     _delta_pill_html,
     THEME_CSS,
-    STOPS_FILE,
-    STOPS_URL,
-    ROUTES_FILE,
-    ROUTES_URL,
     SUBE_MONTHLY_FILE,
     SUBE_SOURCE_FILES,
     AMBA_BUS_BOUNDS,
@@ -76,11 +70,8 @@ for message in data_messages:
     st.caption(message)
 
 with st.spinner("Cargando datos de colectivos..."):
-    stops_fc = load_geojson(STOPS_FILE, STOPS_URL)
-    routes_fc = load_geojson(ROUTES_FILE, ROUTES_URL)
-
-stops_df = build_stops_table(stops_fc)
-routes_df = build_routes_table_amba(routes_fc, _load_amba_sources())
+    stops_df = load_stops_df()
+    routes_df = load_routes_df()
 
 stop_lineas = set(stops_df["linea"])
 
