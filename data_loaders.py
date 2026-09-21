@@ -1119,7 +1119,12 @@ def load_molinetes(token: str) -> pd.DataFrame:
 
 @st.cache_data(show_spinner=False)
 def load_subte_stations_geo() -> pd.DataFrame:
-    """Una fila por estación única (normalizada) con coordenadas, para el mapa de molinetes."""
+    """Una fila por estación y línea con coordenadas, para el mapa de molinetes.
+
+    El geojson trae estaciones homónimas en líneas distintas (p.ej. Callao y
+    Pueyrredón en B y D, Independencia en C y E) con coordenadas propias; hay que
+    conservarlas separadas o se pisan y el mapa las rotula con la línea equivocada.
+    """
     stations = load_subte_stations()
     if stations.empty:
         return pd.DataFrame(columns=["nombre", "linea", "lat", "lon"])
@@ -1128,7 +1133,8 @@ def load_subte_stations_geo() -> pd.DataFrame:
         nombre = _clean_label(r["estacion"])
         if not nombre:
             continue
-        rows.setdefault(_normalize(nombre), [nombre, _clean_label(r["linea"]), r["lat"], r["lon"]])
+        linea = _clean_label(r["linea"])
+        rows.setdefault((_normalize(nombre), linea), [nombre, linea, r["lat"], r["lon"]])
     return pd.DataFrame(rows.values(), columns=["nombre", "linea", "lat", "lon"])
 
 
