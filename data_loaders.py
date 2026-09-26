@@ -1,4 +1,5 @@
 import gzip
+import math
 import os
 import re
 import io
@@ -228,6 +229,122 @@ CABA_BOX = {
 OSM_STOP_RADIUS_M = 150
 ALL_LINES_SIMPLE_STEP_M = 30.0
 CHOROPLETH_BINS = 5
+
+# --- Tema de la app -------------------------------------------------------
+# Un solo lugar para la paleta de marca y los basemaps: las tres apps usan la
+# misma identidad visual (fondo #0e1117 del .streamlit/config.toml).
+ACCENT = "#4c8bf5"
+ACCENT_SOFT = "#7b2fbf"
+INK = "#f5f7fb"
+INK_DIM = "#aeb8cc"
+INK_FAINT = "#8b95ab"
+CARD_BG = "#131824"
+CARD_BORDER = "#2d3548"
+POS_COLOR = "#3ddc84"
+NEG_COLOR = "#ff7b7b"
+
+# Basemaps sin API key + CSS de controles Leaflet teñido para que los popups,
+# tooltips, zoom y atribución no destaquen como cajas blancas sobre un dashboard
+# oscuro. Se usa el canvas de Esri (`services.arcgisonline.com`, key-free) con su
+# capa de etiquetas: CARTO (`basemaps.cartocdn.com`) se descartó porque en algunas
+# redes los tiles no llegan a completarse y el mapa queda en blanco.
+_ESRI_ATTR = (
+    'Tiles &copy; <a href="https://www.esri.com/">Esri</a> '
+    '(Esri, HERE, Garmin, &copy; OpenStreetMap contributors)'
+)
+_ESRI_LABELS_ATTR = 'Labels &copy; <a href="https://www.esri.com/">Esri</a>'
+_ESRI = "https://services.arcgisonline.com/ArcGIS/rest/services/Canvas"
+
+
+def _esri_layers(theme_name: str) -> list:
+    """Base + capa de etiquetas (nombres de calles/lugares) del canvas de Esri."""
+    return [
+        {
+            "url": f"{_ESRI}/World_{theme_name}_Gray_Base/MapServer/tile/{{z}}/{{y}}/{{x}}",
+            "attribution": _ESRI_ATTR,
+            "max_native_zoom": 16,
+        },
+        {
+            "url": f"{_ESRI}/World_{theme_name}_Gray_Reference/MapServer/tile/{{z}}/{{y}}/{{x}}",
+            "attribution": _ESRI_LABELS_ATTR,
+            "overlay": True,
+            "max_native_zoom": 16,
+        },
+    ]
+
+
+MAP_THEMES = {
+    "Oscuro": {
+        "layers": _esri_layers("Dark"),
+        "background": "#0a0d13",
+        "marker_outline": "#f2f5fb",
+    },
+    "Claro": {
+        "layers": _esri_layers("Light"),
+        "background": "#eef1f5",
+        "marker_outline": "#1b2232",
+    },
+    "Calles (OSM)": {
+        "layers": [
+            {
+                "url": "https://tile.openstreetmap.de/{z}/{x}/{y}.png",
+                "attribution": (
+                    '&copy; <a href="https://www.openstreetmap.org/copyright">'
+                    "OpenStreetMap</a> contributors"
+                ),
+                "max_native_zoom": 19,
+            }
+        ],
+        "background": "#eaeae2",
+        "marker_outline": "#1b2232",
+    },
+}
+TEMA_MAPA_OPTS = list(MAP_THEMES)
+TEMA_MAPA_DEFAULT = "Oscuro"
+
+# Rampas de color. La secuencial está elegida para leerse sobre fondo oscuro
+# (tipo magma: violeta -> naranja -> crema) y la divergente usa los mismos
+# verde/rojo que los pills de variación del resto de la app.
+RAMP_VIAJES = ["#241041", "#5b1a6b", "#9c2a63", "#d1603f", "#f2a94e", "#fbe6a8"]
+RAMP_DELTA = ["#ff7b7b", "#b9676f", "#8b95ab", "#5aa17c", "#3ddc84"]
+RAMP_CHOROPLETH = "magma"
+
+MAP_DARK_CSS = """
+<style>
+.leaflet-popup-content-wrapper, .leaflet-popup-tip {
+    background:#131824; color:#e8ecf5; border:1px solid #2d3548;
+    box-shadow:0 10px 28px rgba(0,0,0,.55);
+}
+.leaflet-popup-content {
+    margin:12px 14px; line-height:1.45;
+    font-family:"Calibri","Segoe UI",Tahoma,Arial,sans-serif;
+}
+.leaflet-popup-close-button { color:#8b95ab !important; }
+.leaflet-popup-close-button:hover { color:#fff !important; }
+.leaflet-tooltip {
+    background:#131824; color:#e8ecf5; border:1px solid #2d3548;
+    box-shadow:0 6px 16px rgba(0,0,0,.5);
+    font-family:"Calibri","Segoe UI",Tahoma,Arial,sans-serif;
+}
+.leaflet-tooltip-top:before { border-top-color:#2d3548; }
+.leaflet-bar a {
+    background:#131824; color:#e8ecf5; border-bottom:1px solid #2d3548;
+}
+.leaflet-bar a:hover { background:#1c2130; color:#fff; }
+.leaflet-control-attribution {
+    background:rgba(19,24,36,.88) !important; color:#8b95ab !important; font-size:10px;
+}
+.leaflet-control-attribution a { color:#aeb8cc !important; }
+.leaflet-control-scale-line {
+    background:rgba(19,24,36,.82); color:#aeb8cc; border-color:#2d3548;
+}
+.leaflet-control-legend {
+    background:rgba(19,24,36,.92); border:1px solid #2d3548; border-radius:10px;
+    padding:8px 10px; box-shadow:0 8px 22px rgba(0,0,0,.5);
+}
+.leaflet-control-legend, .leaflet-control-legend * { color:#c6cede !important; }
+</style>
+"""
 
 SEL_LINEA = "— Seleccioná una línea —"
 VISTA_MENSUAL = "Mensual"
@@ -1324,6 +1441,127 @@ def route_colors(description: str | None):
 
 
 # ---------------------------------------------------------------------------
+# Tema del mapa: basemap oscuro/claro y escalas de color
+# ---------------------------------------------------------------------------
+def tema_mapa_selector(key="tema_mapa", label="Tema del mapa", default=TEMA_MAPA_DEFAULT):
+    """Radio en la sidebar para elegir el basemap (oscuro por defecto)."""
+    opts = list(MAP_THEMES)
+    idx = opts.index(default) if default in opts else 0
+    return st.sidebar.radio(label, opts, index=idx, key=key)
+
+
+def add_basemap(m, theme=TEMA_MAPA_DEFAULT):
+    """Agrega el basemap al mapa según el tema y, en oscuro, inyecta el CSS de
+    los controles Leaflet (popups/tooltips/zoom/atribución en la tonalidad del app)."""
+    cfg = MAP_THEMES.get(theme) or MAP_THEMES[TEMA_MAPA_DEFAULT]
+    for layer in cfg["layers"]:
+        overlay = bool(layer.get("overlay"))
+        folium.TileLayer(
+            tiles=layer["url"],
+            attr=layer["attribution"],
+            name="Etiquetas de lugar" if overlay else "Basemap",
+            overlay=overlay,
+            max_zoom=19,
+            max_native_zoom=layer.get("max_native_zoom", 19),
+        ).add_to(m)
+    # el CSS de controles va siempre: el app es oscuro y popups/tooltips en
+    # oscuro se leen bien tanto sobre el canvas oscuro como sobre el claro.
+    m.get_root().html.add_child(folium.Element(MAP_DARK_CSS))
+    m.get_root().html.add_child(
+        folium.Element(f'<style>.leaflet-container{{background:{cfg["background"]};}}</style>')
+    )
+    return m
+
+
+def make_map(location, zoom_start=12, theme=TEMA_MAPA_DEFAULT, **kwargs):
+    """Crea un mapa Folium con el basemap del tema elegido."""
+    m = folium.Map(location=list(location), zoom_start=zoom_start, tiles=None, **kwargs)
+    return add_basemap(m, theme)
+
+
+def marker_outline(theme=TEMA_MAPA_DEFAULT) -> str:
+    return (MAP_THEMES.get(theme) or MAP_THEMES[TEMA_MAPA_DEFAULT])["marker_outline"]
+
+
+def ramp_color(stops, t) -> str:
+    """Interpola una rampa de colores hex en `t` (0..1)."""
+    try:
+        t = float(t)
+    except (TypeError, ValueError):
+        return stops[0]
+    if t != t:
+        return stops[-1]
+    t = max(0.0, min(1.0, t))
+    pos = t * (len(stops) - 1)
+    i = int(pos)
+    if i >= len(stops) - 1:
+        return stops[-1]
+    f = pos - i
+    a = stops[i].lstrip("#")
+    b = stops[i + 1].lstrip("#")
+    ch = [int(int(a[j : j + 2], 16) + (int(b[j : j + 2], 16) - int(a[j : j + 2], 16)) * f) for j in (0, 2, 4)]
+    return "#%02x%02x%02x" % tuple(ch)
+
+
+def log_norm(v, lo, hi) -> float:
+    """Normaliza `v` a 0..1 en escala log10 (los viajes están muy concentrados:
+    Constitución ~41M contra una mediana de 4,8M, así que una rampa lineal deja
+    a todas las demás estaciones del mismo color)."""
+    try:
+        v = float(v)
+    except (TypeError, ValueError):
+        return 0.0
+    if v != v or v <= 0:
+        return 0.0
+    lo = max(float(lo), 1.0)
+    hi = max(float(hi), lo * 1.0000001)
+    if hi <= lo:
+        return 0.0
+    return max(0.0, min(1.0, (math.log10(v) - math.log10(lo)) / (math.log10(hi) - math.log10(lo))))
+
+
+def marker_radius(v, lo, hi, rmin=3.0, rmax=15.0, log=True) -> float:
+    """Radio del marcador con el *área* proporcional al valor normalizado
+    (radio ∝ √t) para que la superficie, y no el diámetro, codifique el dato."""
+    t = log_norm(v, lo, hi) if log else max(0.0, min(1.0, (float(v or 0) - lo) / max(hi - lo, 1e-9)))
+    return rmin + (rmax - rmin) * math.sqrt(max(t, 0.0))
+
+
+def ramp_legend_html(title, stops, labels=None, note="") -> str:
+    """Leyenda de color horizontal (gradiente + etiquetas) para poner junto al mapa."""
+    css = ", ".join(f"{c} {i / max(len(stops) - 1, 1) * 100:.1f}%" for i, c in enumerate(stops))
+    ticks = ""
+    if labels and len(labels) > 1:
+        ticks = "".join(
+            f'<span style="left:{i / (len(labels) - 1) * 100:.1f}%;">{lab}</span>' for i, lab in enumerate(labels)
+        )
+    note_html = f'<div class="legend-note">{note}</div>' if note else ""
+    return (
+        '<div class="ramp-legend">'
+        f'<div class="legend-title">{title}</div>'
+        f'<div class="legend-bar" style="background:linear-gradient(90deg,{css});"></div>'
+        f'<div class="legend-ticks">{ticks}</div>'
+        f"{note_html}"
+        "</div>"
+    )
+
+
+def app_header_html(kicker: str, title: str, subtitle: str = "", chips=()) -> str:
+    """Encabezado propio de las apps: antetítulo, título, bajada y chips de estado
+    (período, filtros activos) en una sola banda."""
+    chips_html = "".join(f'<span class="chip">{c}</span>' for c in chips)
+    sub_html = f'<p class="app-subtitle">{subtitle}</p>' if subtitle else ""
+    return (
+        '<div class="app-header">'
+        f'<div class="app-kicker">{kicker}</div>'
+        f'<h1 class="app-title">{title}</h1>'
+        f"{sub_html}"
+        + (f'<div class="app-meta">{chips_html}</div>' if chips_html else "")
+        + "</div>"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Dibujo en Folium
 # ---------------------------------------------------------------------------
 def draw_route(m, coords, color, band=None, weight=4, opacity=0.8, tooltip=None, popup=None):
@@ -1864,10 +2102,109 @@ THEME_CSS = """
 html, body, .stApp, .stApp * {
     font-family: "Calibri", "Segoe UI", Tahoma, Arial, sans-serif !important;
 }
+/* Streamlit dibuja los iconos como ligatures de "Material Symbols Rounded",
+   pero el woff2 que sirve (static/media/MaterialSymbols-Rounded.*.woff2) no
+   trae los glyphs: el ligature queda escrito tal cual y el botón de colapsar la
+   barra muestra el texto "keyboard_double_arrow_left" (y el del expander,
+   "keyboard_arrow_right"). Como es texto plano no se arregla forzando la fuente,
+   así que se oculta y se dibuja el ícono con una máscara SVG inline (sin
+   dependencias externas). El selector es acotado a esos dos contenedores para no convertir en un cuadrado cualquier otro icono de Material. */
+[data-testid="stSidebarCollapseButton"] [data-testid="stIconMaterial"],
+[data-testid="stExpander"] summary [data-testid="stIconMaterial"] {
+    font-size: 0 !important;
+    width: 20px;
+    height: 20px;
+    display: inline-block;
+    background: currentColor;
+    -webkit-mask: var(--ms-icon) center / contain no-repeat;
+    mask: var(--ms-icon) center / contain no-repeat;
+}
+[data-testid="stSidebarCollapseButton"] [data-testid="stIconMaterial"] {
+    --ms-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M11 18l-6-6 6-6v12zm8-12v12H9l6-6-6-6h10z'/%3E%3C/svg%3E");
+}
+[data-testid="stExpander"] summary [data-testid="stIconMaterial"] {
+    --ms-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M8.6 4.6L12 8l3.4-3.4L17 6.2 13.2 10 17 13.8l-1.6 1.6L12 12l-3.4 3.4L7 13.8 10.8 10 7 6.2z'/%3E%3C/svg%3E");
+    transition: transform .15s ease-in-out;
+}
+[data-testid="stExpander"][open] summary [data-testid="stIconMaterial"] {
+    transform: rotate(180deg);
+}
 .app-header {
     border-bottom: 1px solid #2a3142;
-    padding-bottom: 10px;
-    margin-bottom: 6px;
+    padding-bottom: 12px;
+    margin-bottom: 14px;
+}
+.app-header .app-kicker {
+    color: #4c8bf5;
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 1.3px;
+    text-transform: uppercase;
+}
+.app-header .app-title {
+    color: #ffffff;
+    font-size: 40px;
+    font-weight: 800;
+    line-height: 1.08;
+    margin: 2px 0 0 0;
+}
+.app-header .app-subtitle {
+    color: #aeb8cc;
+    font-size: 18px;
+    margin: 4px 0 0 0;
+}
+.app-header .app-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 10px;
+}
+.app-header span.chip {
+    background: #1c2130;
+    border: 1px solid #2d3548;
+    border-radius: 20px;
+    padding: 3px 11px;
+    font-size: 12.5px;
+    color: #c6cede;
+    white-space: nowrap;
+}
+.app-header span.chip b {
+    color: #ffffff;
+    font-weight: 700;
+}
+div.ramp-legend {
+    margin-top: 10px;
+    max-width: 420px;
+}
+div.ramp-legend .legend-title {
+    color: #8b95ab;
+    font-size: 11.5px;
+    font-weight: 700;
+    letter-spacing: .7px;
+    text-transform: uppercase;
+}
+div.ramp-legend .legend-bar {
+    height: 10px;
+    border-radius: 6px;
+    border: 1px solid #2d3548;
+    margin-top: 5px;
+}
+div.ramp-legend .legend-ticks {
+    position: relative;
+    height: 16px;
+    margin-top: 3px;
+}
+div.ramp-legend .legend-ticks span {
+    position: absolute;
+    transform: translateX(-50%);
+    color: #aeb8cc;
+    font-size: 11.5px;
+    font-variant-numeric: tabular-nums;
+}
+div.ramp-legend .legend-note {
+    color: #8b95ab;
+    font-size: 12px;
+    margin-top: 2px;
 }
 div.metric-box {
     background: linear-gradient(160deg, #1b2232 0%, #131824 100%);

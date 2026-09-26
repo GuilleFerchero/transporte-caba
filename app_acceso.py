@@ -37,6 +37,9 @@ from data_loaders import (
     LINE_COLORS,
     SUBE_MONTHLY_FILE,
     SUBE_SOURCE_FILES,
+    app_header_html,
+    make_map,
+    tema_mapa_selector,
     _fmt,
     _fmt_dec,
 )
@@ -54,8 +57,29 @@ st.set_page_config(
 
 st.markdown(THEME_CSS, unsafe_allow_html=True)
 
-st.title("Acceso a la Ciudad desde Barrios Populares")
-st.subheader("Cobertura de la red de transporte (colectivo, subte y ferrocarril) sobre los barrios RE-NABAP del AMBA")
+with st.spinner("Cargando datos..."):
+    routes_df = load_routes_df()
+    ren_centroids_full = load_renabap_centroids()
+
+st.markdown(
+    app_header_html(
+        "Buenos Aires Data · Secretaría de Transporte",
+        "Acceso a la Ciudad desde Barrios Populares",
+        "Cobertura de colectivo, subte y ferrocarril sobre los barrios RE-NABAP del AMBA",
+        chips=[
+            f"Barrios RE-NABAP <b>{_fmt(len(ren_centroids_full))}</b>",
+            f"Red de colectivo <b>{_fmt(len(routes_df))} recorridos</b>",
+            f"Umbral de cercanía <b>{_fmt_dec(RENABAP_RADIUS_M)} m</b>",
+        ],
+    ),
+    unsafe_allow_html=True,
+)
+
+for message in ensure_local_data():
+    st.caption(message)
+
+with st.sidebar:
+    tema_mapa = tema_mapa_selector()
 
 
 @st.cache_data(show_spinner=False)
@@ -99,13 +123,6 @@ def _bus_color(r):
     return JUR_COLOR.get(jur, "#7f7f7f")
 
 
-data_messages = ensure_local_data()
-for message in data_messages:
-    st.caption(message)
-
-with st.spinner("Cargando datos..."):
-    routes_df = load_routes_df()
-
 with st.sidebar:
     st.markdown("### Redes consideradas")
     st.caption(
@@ -118,7 +135,6 @@ with st.sidebar:
     show_bus = st.checkbox("Mostrar todas las líneas de colectivo", value=False)
 
     st.markdown("### Filtro territorial")
-    ren_centroids_full = load_renabap_centroids()
     partidos = ["Todos"] + sorted(
         ren_centroids_full["partido"].dropna().unique(),
         key=lambda p: (len(str(p)), str(p)),
@@ -227,7 +243,7 @@ st.caption(
     unsafe_allow_html=True,
 )
 
-m = folium.Map(location=[-34.6037, -58.3816], zoom_start=10)
+m = make_map([-34.6037, -58.3816], zoom_start=10, theme=tema_mapa)
 
 bar_id = None
 bus_routes = routes_df.iloc[0:0]

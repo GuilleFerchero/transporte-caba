@@ -47,6 +47,11 @@ from data_loaders import (
     VISTA_MENSUAL,
     VISTA_DIA,
     VISTA_SEMANA,
+    RAMP_CHOROPLETH,
+    app_header_html,
+    make_map,
+    marker_outline,
+    tema_mapa_selector,
     _fmt,
     _fmt_dec,
 )
@@ -62,16 +67,30 @@ st.set_page_config(
 
 st.markdown(THEME_CSS, unsafe_allow_html=True)
 
-st.title("Transporte Público AMBA")
-st.subheader("Colectivos, ferrocarril y subte - recorridos, paradas y demanda")
-
-data_messages = ensure_local_data()
-for message in data_messages:
-    st.caption(message)
-
 with st.spinner("Cargando datos de colectivos..."):
     stops_df = load_stops_df()
     routes_df = load_routes_df()
+
+st.markdown(
+    app_header_html(
+        "Buenos Aires Data · Secretaría de Transporte",
+        "Transporte Público AMBA",
+        "Colectivos, ferrocarril y subte: recorridos, paradas y demanda",
+        chips=[
+            f"Recorridos AMBA <b>{_fmt(len(routes_df))}</b>",
+            f"Paradas CABA <b>{_fmt(len(stops_df))}</b>",
+            f"Líneas <b>{_fmt(len(set(routes_df['linea']) | set(stops_df['linea'])))}</b>",
+        ],
+    ),
+    unsafe_allow_html=True,
+)
+
+for message in ensure_local_data():
+    st.caption(message)
+
+with st.sidebar:
+    tema_mapa = tema_mapa_selector()
+    st.caption("El basemap oscuro acompaña al tema de la app; el claro sirve para leer calles y referencias.")
 
 stop_lineas = set(stops_df["linea"])
 
@@ -306,7 +325,7 @@ with col_info:
     else:
         st.caption("Seleccioná una línea para ver sus recorridos y paradas, o mostrá todas las líneas.")
 
-m = folium.Map(location=[-34.6037, -58.3816], zoom_start=12)
+m = make_map([-34.6037, -58.3816], zoom_start=12, theme=tema_mapa)
 
 comuna_demanda = pd.DataFrame()
 if linea == "Todas las líneas":
@@ -357,10 +376,11 @@ if linea == "Todas las líneas":
                 data=comuna_demanda[["comuna", "usos"]],
                 columns=["comuna", "usos"],
                 key_on="feature.properties.comuna",
-                fill_color="YlOrRd",
-                fill_opacity=0.55,
-                line_color="#333333",
-                line_weight=1.5,
+                fill_color=RAMP_CHOROPLETH,
+                fill_opacity=0.6,
+                line_color=marker_outline(tema_mapa),
+                line_opacity=0.35,
+                line_weight=1,
                 threshold_scale=thresholds,
                 legend_name="Usos SUBE anuales estimados por comuna",
                 name="Demanda estimada por comuna (CABA)",
@@ -382,13 +402,16 @@ elif real_linea:
         )
 
     for _, stop_row in stops_df[stops_df["linea"] == linea].iterrows():
+        color_linea, _ = route_colors(LINE_COLORS.get(linea))
         folium.CircleMarker(
             location=[stop_row["lat"], stop_row["lon"]],
             radius=4,
-            color="white",
+            # el relleno toma el color de la librea: con relleno casi negro
+            # las paradas desaparecían sobre el basemap oscuro
+            color=marker_outline(tema_mapa),
             weight=1,
             fill=True,
-            fill_color="#111111",
+            fill_color=color_linea,
             fill_opacity=0.9,
             tooltip=f"Línea {linea}: {stop_row['direccion']}",
             popup=folium.Popup(

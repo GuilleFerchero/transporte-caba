@@ -263,6 +263,47 @@ y la Secretaría de Transporte (RMBA).
   en pandas), para no reparsear los 15 MB en cada rerun.
 - `data/` está en `.gitignore`. Para regenerar testear offline borrar archivos localmente y la app descarga sola.
 
+## Tema visual compartido (las 3 apps)
+
+- **Basemap con toggle**: las tres apps usan `make_map(location, zoom_start, theme=...)` +
+  `tema_mapa_selector()` de `data_loaders.py`. El default es **"Oscuro"**. Cada tema de
+  `MAP_THEMES` trae una lista de `layers` (base + etiquetas) y se dibujan con
+  `add_basemap()`, que además inyecta `MAP_DARK_CSS` (popups, tooltips, barra de zoom,
+  atribución, escala y leyenda de Folium en la tonalidad del app).
+  - **Oscuro** = Esri *World Dark Gray Canvas* (base + reference), **Claro** = Esri
+    *World Light Gray Canvas*, **Calles (OSM)** = `tile.openstreetmap.de` (nombres de calle
+    reales, para leer direcciones).
+  - **Por qué Esri y no CARTO**: `basemaps.cartocdn.com` (CARTO `dark_all`/`light_all`) y
+    `tile.openstreetmap.org` se quedan **colgados sin completar** en algunas redes — el
+    `<img>`/tile nunca dispara load ni error y el mapa queda en blanco. Se detectó
+    probando los tiles uno por uno en el navegador del usuario (2026-09-26). `services.
+    arcgisonline.com` y `tile.openstreetmap.de` sí cargan. **Ojo: la URL de Esri es
+    `{z}/{y}/{x}` (y antes de x) y su natively-máx es z16** (`max_native_zoom=16` +
+    `max_zoom=19`), por eso se ven algo suaves al alejar.
+  - Si algún día vuelve a fallar un basemap, la forma rápida de verificarlo es una
+    página local con un `<img>` por proveedor y cartel de OK/FALLO (sin DevTools: en
+    algunas máquinas F12 no abre). Ojo con el `img.src`: si no se asigna, la página
+    queda en "cargando..." para siempre y parece un problema de red que no existe.
+- **Header común**: `app_header_html(kicker, title, subtitle, chips)` reemplaza los
+  `st.title`/`st.subheader` de las tres apps (kicker = fuente, título, bajada y una fila
+  de chips con el estado del dataset). Los estilos viven en `THEME_CSS`.
+- **Rampas de color** (para no depender de las rampas de `branca` de folium, que son
+  claras y con poco contraste en oscuro): `RAMP_VIAJES` (secuencial, viajes),
+  `RAMP_DELTA` (divergente, variación interanual) y `RAMP_CHOROPLETH` (comunas).
+  Helpers: `ramp_color()` (interpolación hex), `log_norm()` (log10 normalizado),
+  `marker_radius()` (radio ∝ √t para que el *área* acompañe la escala),
+  `ramp_legend_html()` (gradiente + labels + nota) y `marker_outline(theme)`.
+- **Ojo al pintar sobre oscuro**: en `app_transporte.py` las paradas de la línea
+  seleccionada usan `fill_color` = color de la librea (antes `#111111`, que
+  desaparecía sobre el basemap oscuro) y el borde sale de `marker_outline(tema_mapa)`.
+  El choropleth de comunas usa `RAMP_CHOROPLETH` y bordes de baja opacidad.
+- `app_subte.py` (rediseño 2026): color y tamaño por estación con **escala logarítmica
+  recortada en p5/p95** (los viajes están muy concentrados: la estación más cargada
+  multiplica por ~9 a la mediana) y un modo **"Δ vs año anterior"** que cambia el color
+  a la rampa divergente (el tamaño sigue siendo el volumen). El **slider de franja**
+  devuelve una tupla; si llega un escalar se interpreta como "todo el día" (por
+  robustez, no debería pasar en el browser).
+
 ## Detalles técnicos / lecciones aprendidas
 
 - **Sin reruns al interactuar con el mapa**: `st_folium` por defecto devuelve el
