@@ -2126,7 +2126,7 @@ html, body, .stApp, .stApp * {
     --ms-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M8.6 4.6L12 8l3.4-3.4L17 6.2 13.2 10 17 13.8l-1.6 1.6L12 12l-3.4 3.4L7 13.8 10.8 10 7 6.2z'/%3E%3C/svg%3E");
     transition: transform .15s ease-in-out;
 }
-[data-testid="stExpander"][open] summary [data-testid="stIconMaterial"] {
+[data-testid="stExpander"] details[open] summary [data-testid="stIconMaterial"] {
     transform: rotate(180deg);
 }
 .app-header {

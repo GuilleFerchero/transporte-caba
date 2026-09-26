@@ -306,6 +306,24 @@ y la Secretaría de Transporte (RMBA).
 
 ## Detalles técnicos / lecciones aprendidas
 
+- **Los iconos de Material de Streamlit se ven como texto**: el woff2 que sirve
+  (`static/media/MaterialSymbols-Rounded.*.woff2`) es un subset **sin los glyphs**,
+  así que los ligatures no se sustituyen y el sidebar muestra
+  `keyboard_double_arrow_left` (y el expander `keyboard_arrow_right`) en vez del
+  ícono — y nada de CSS lo arregla, porque el ligature es texto plano (medido:
+  303px con la fuente Material, 284px con Calibri, o sea texto en ambos casos).
+  Workaround en `THEME_CSS`: `font-size: 0` + `mask` con un chevron SVG inline en
+  `stSidebarCollapseButton` y en el summary del `stExpander` (que rota 180° vía
+  `details[open]`, porque el `open` va en el `<details>`, no en el div con
+  `data-testid="stExpander"`). El selector está acotado a esos dos contenedores
+  para no tapar ningún otro icono.
+- **Medir CSS en vez de mirar capturas**: con Chrome headless
+  (`--dump-dom`) + un `<script>` que escribe `getBoundingClientRect().width` o
+  `getComputedStyle().transform` en el DOM se verifica un `mask`/rotación en
+  segundos, sin F12 ni screenshots borrosos de Streamlit. Ojo: pasar el stdout
+  por `2>&1` a una variable vacía la salida; encadenar con `| Select-String`
+  funciona.
+
 - **Sin reruns al interactuar con el mapa**: `st_folium` por defecto devuelve el
   estado del mapa (bounds, zoom, clics) en cada interacción y eso provoca que
   Streamlit re-ejecute el script. Se corrigió con `returned_objects=[]` en la
