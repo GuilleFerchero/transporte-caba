@@ -87,7 +87,9 @@ ROUTES_SOURCE_FILES = [ROUTES_FILE, RMBA_NACIONAL_FILE, RMBA_PROVINCIAL_FILE, RM
 # Si data_bundle/ no existe o el schema no coincide, se usa el flujo clasico.
 BUNDLE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data_bundle")
 BUNDLE_META_FILE = os.path.join(BUNDLE_DIR, "bundle_meta.json")
-BUNDLE_SCHEMA_VERSION = 1
+# v2: routes.parquet conserva todos los recorridos RMBA (v1 se quedaba con uno por
+# línea) y sube_diario.parquet se lee siempre con fecha datetime.
+BUNDLE_SCHEMA_VERSION = 2
 
 BUNDLE_ROUTES_FILE = os.path.join(BUNDLE_DIR, "routes.parquet")
 BUNDLE_STOPS_FILE = os.path.join(BUNDLE_DIR, "stops.parquet")
@@ -843,16 +845,25 @@ def _load_amba_sources() -> list[tuple[dict, str]]:
 
 @st.cache_data(show_spinner=False)
 def build_routes_table_amba(routes_fc: dict, rmba_sources) -> pd.DataFrame:
+    """Consolida BA Data (CABA) + recorridos RMBA.
+
+    La dedupe es **por número de línea y solo contra BA Data**: si una línea ya
+    está en BA Data se descarta la geometría RMBA (que es casi idéntica), pero
+    todos los features de una línea que solo existe en RMBA se conservan, porque
+    cada feature es un variante de recorrido (línea × ramal × sentido) y quedarse
+    con uno solo perdía el 95% de los kilómetros del conurbano (y hacía que
+    "usos por km" saliera inflado). No hace falta deduplicar entre features de
+    RMBA: se verificó que no hay features con geometría idéntica.
+    """
     base = build_routes_table(routes_fc)
     base["jurisdiccion"] = "CABA"
     rows = []
-    seen = set(base["linea"])
+    covered = set(base["linea"])
     for fc, jur in rmba_sources:
         for feature in fc["features"]:
             linea = _norm_rmba_linea(feature["properties"].get("LINEA"))
-            if linea is None or linea in seen:
+            if linea is None or linea in covered:
                 continue
-            seen.add(linea)
             coords = _clean_route_coords(feature["geometry"])
             if not coords:
                 continue
@@ -870,6 +881,10 @@ def build_routes_table_amba(routes_fc: dict, rmba_sources) -> pd.DataFrame:
                     "jurisdiccion": jur,
                 }
             )
+    if not rows:
+        # Sin fuentes RMBA, pd.concat con un frame vacío degrada las columnas
+        # numéricas a object y rompe los KPIs (longitud_m deja de ser float).
+        return base.reset_index(drop=True)
     extra = pd.DataFrame(rows, columns=list(base.columns))
     return pd.concat([base, extra], ignore_index=True)
 
@@ -1263,14 +1278,35 @@ def _normalize_sube_linea(code) -> str | None:
     return _norm_rmba_linea(code)
 
 
-def _is_caba_sube_row(code, jurisdiccion) -> bool:
+# Grafías de línea que usa el dataset nacional de usos SUBE para las líneas del
+# AMBA. Hay dos familias y ninguna es uniforme:
+#   - con prefijo de/cosmos: CABA_LINEA_001, BSAS_LINEA_148, BSAS_LINEA303
+#     (sin separador), BS_AS_LINEA_326, BS_ASLINEA_327, LINEA_BSAS_503
+#   - con la palabra LINEA: LINEA 1, LINEA 410, LINEA 501 A, LINEA_504B,
+#     LINEA_506_AMBA, LINEA_540_BSAS
+# La lista de prefijos que se usaba antes cubría solo tres variantes y descartaba
+# 4,9% de los usos AMBA (16 líneas del AMBA quedaban sin demanda, 14 con recorrido).
+# El patrón de abajo acepta todas las variantes observadas y sigue rechazando:
+#   - "LINEA RZ-*" (Zárate) y cualquier grafía con RZ: colisionan por número con
+#     las líneas 1-11 de CABA (AGENTS.md, "no filtrar solo con AMBA=SI").
+#   - Códigos pelados sin la palabra LINEA ("1", "2A", "2B"): son de Campana y
+#     colisionan con las líneas 1 y 2 de CABA.
+#   - Grafías sin dígitos ("LINEA OESTE", "NORTE"): no se pueden normalizar.
+SUBE_LINEA_RE = re.compile(
+    r"^(?:(?:CABA_LINEA|BSAS_LINEA|BS_AS_?LINEA|LINEA_BSAS)[\s_]*\d|LINEA[\s_]*\d)"
+)
+
+
+def _is_amba_sube_code(code) -> bool:
+    """True si la grafía de `LINEA` del dataset SUBE corresponde a una línea del AMBA.
+
+    Es la regla que se aplica vectorizada en `_read_sube_daily_all`; esta función
+    es la versión legible de una fila para depurar y para tests.
+    """
     cu = "" if code is None else str(code).strip().upper()
-    if cu.startswith(("CABA", "BSAS_LINEA", "BS_ASLINEA")):
-        return True
-    if "RZ" in cu or not cu:
+    if not cu or "RZ" in cu:
         return False
-    jur = "" if jurisdiccion is None else str(jurisdiccion).strip()
-    return jur.upper() in ("NACIONAL", "C.A.B.A")
+    return bool(SUBE_LINEA_RE.match(cu))
 
 
 SUBE_SOURCE_FILES = [SUBE_USOS_2024_FILE, SUBE_USOS_2025_FILE, SUBE_USOS_2026_FILE]
@@ -1298,10 +1334,7 @@ def _read_sube_daily_all() -> pd.DataFrame:
         df["AMBA"] = df["AMBA"].str.strip().str.upper()
         df["TIP"] = df["TIPO_TRANSPORTE"].str.strip().str.upper()
         pref = df["LINEA"].astype(str).str.strip().str.upper()
-        ok = pref.str.startswith(("CABA", "BSAS_LINEA", "BS_ASLINEA")) | (
-            (~pref.str.contains("RZ"))
-            & df["JURISDICCION"].fillna("").str.strip().str.upper().isin(["NACIONAL", "C.A.B.A"])
-        )
+        ok = pref.str.match(SUBE_LINEA_RE) & (~pref.str.contains("RZ"))
         df = df[ok & (df["AMBA"] == "SI") & (df["TIP"] == "COLECTIVO")].copy()
         df["linea"] = df["LINEA"].apply(_normalize_sube_linea)
         df = df.dropna(subset=["linea"])
@@ -1402,6 +1435,7 @@ def load_sube_transactions(token: str) -> pd.DataFrame:
 def load_sube_daily(token: str) -> pd.DataFrame:
     df = _read_parquet_bundle(BUNDLE_SUBE_DIARIO_FILE)
     if df is not None:
+        df["fecha"] = pd.to_datetime(df["fecha"])
         return df.sort_values(["linea", "fecha"]).reset_index(drop=True)
     if not _sube_aggregates_fresh():
         _build_sube_aggregates()
@@ -1945,6 +1979,12 @@ def _grid_matches(grid, meta, net_lat, net_lon, qlat, qlon, radius_m):
         gk_lat = int(qlat[k] * lat_m / cell_m)
         gk_lon = int(qlon[k] * lon_m / cell_m)
         hit = False
+        # OJO: hay que recorrer TODAS las celdas vecinas. Si se corta el barrido
+        # al primer anillo con hit (un `break` en este loop), net_hit queda con
+        # una fracción de los puntos de red y `lines_near_barrio` devuelve 65%
+        # menos líneas de las que hay a <= radio (medido sobre 60 barrios a
+        # 500 m: 483 -> 168). El KPI de cobertura no se ve afectado porque
+        # renabap_covered_ids solo usa query_hit.
         for di in range(-steps, steps + 1):
             for dj in range(-steps, steps + 1):
                 bucket = grid.get((gk_lat + di, gk_lon + dj))
@@ -1956,8 +1996,6 @@ def _grid_matches(grid, meta, net_lat, net_lon, qlat, qlon, radius_m):
                 if m.any():
                     net_hit.update(idx[m].tolist())
                     hit = True
-            if hit:
-                break
         query_hit[k] = hit
     return net_hit, query_hit
 
