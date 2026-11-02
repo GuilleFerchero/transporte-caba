@@ -2,7 +2,6 @@ import gzip
 import math
 import os
 import re
-import io
 import json
 import zipfile
 import unicodedata
@@ -29,7 +28,6 @@ OSM_STOPS_URLS = [
     "https://overpass.kumi.systems/api/interpreter",
     "https://overpass-api.de/api/interpreter",
 ]
-OSM_STOPS_URL = OSM_STOPS_URLS[0]
 OSM_STOPS_USER_AGENT = "panel-transporte-caba/1.0 (dashboard Streamlit de colectivos AMBA)"
 OSM_AMBA_BBOX = "(-35.20,-59.45,-34.00,-57.85)"
 
@@ -234,12 +232,8 @@ CHOROPLETH_BINS = 5
 # Un solo lugar para la paleta de marca y los basemaps: las tres apps usan la
 # misma identidad visual (fondo #0e1117 del .streamlit/config.toml).
 ACCENT = "#4c8bf5"
-ACCENT_SOFT = "#7b2fbf"
-INK = "#f5f7fb"
 INK_DIM = "#aeb8cc"
 INK_FAINT = "#8b95ab"
-CARD_BG = "#131824"
-CARD_BORDER = "#2d3548"
 POS_COLOR = "#3ddc84"
 NEG_COLOR = "#ff7b7b"
 
@@ -299,7 +293,6 @@ MAP_THEMES = {
         "marker_outline": "#1b2232",
     },
 }
-TEMA_MAPA_OPTS = list(MAP_THEMES)
 TEMA_MAPA_DEFAULT = "Oscuro"
 
 # Rampas de color. La secuencial está elegida para leerse sobre fondo oscuro
@@ -350,8 +343,6 @@ SEL_LINEA = "— Seleccioná una línea —"
 VISTA_MENSUAL = "Mensual"
 VISTA_DIA = "Tipo de día (hábiles vs. finde)"
 VISTA_SEMANA = "Semana tipo (Lunes a Domingo)"
-BENCH_NINGUNO = "Sin comparación"
-BENCH_AMBA = "Total AMBA"
 
 BASE_COLORS = {
     "azul": "#1a73e8",
@@ -693,13 +684,6 @@ def stops_near_route(stops_df: pd.DataFrame, lats, lons, radius_m=OSM_STOP_RADIU
             best = np.minimum(best, d.min(axis=1))
         keep[i : i + 250] = best <= radius_m
     return cand[keep].reset_index(drop=True)
-
-
-def _index_series(serie: pd.DataFrame) -> pd.DataFrame:
-    out = serie.copy()
-    base = out["transacciones"].iloc[0]
-    out["idx"] = 100.0 * out["transacciones"] / base if base else 0.0
-    return out
 
 
 # ---------------------------------------------------------------------------
@@ -1263,16 +1247,6 @@ def _normalize_sube_linea(code) -> str | None:
     return _norm_rmba_linea(code)
 
 
-def _is_caba_sube_row(code, jurisdiccion) -> bool:
-    cu = "" if code is None else str(code).strip().upper()
-    if cu.startswith(("CABA", "BSAS_LINEA", "BS_ASLINEA")):
-        return True
-    if "RZ" in cu or not cu:
-        return False
-    jur = "" if jurisdiccion is None else str(jurisdiccion).strip()
-    return jur.upper() in ("NACIONAL", "C.A.B.A")
-
-
 SUBE_SOURCE_FILES = [SUBE_USOS_2024_FILE, SUBE_USOS_2025_FILE, SUBE_USOS_2026_FILE]
 SUBE_AGG_SCHEMA_VERSION = 2
 
@@ -1667,10 +1641,6 @@ def routes_to_geojson(routes_df, color_func=None, use_simple=True) -> dict:
             }
         )
     return {"type": "FeatureCollection", "features": features}
-
-
-def geo_route_style(feature):
-    return {"color": feature["properties"].get("color", "#7f7f7f")}
 
 
 def draw_renabap(m, fc, color=RENABAP_COLOR):

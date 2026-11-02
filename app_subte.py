@@ -10,7 +10,6 @@ from streamlit_folium import st_folium
 
 from data_loaders import (
     ACCENT,
-    ACCENT_SOFT,
     FERIADOS_ARG,
     INK_DIM,
     INK_FAINT,
@@ -89,7 +88,7 @@ def _filter_window(mol, start, end, h0, h1, lineas) -> pd.DataFrame:
     return m
 
 
-def _weekday_avg(mol, start, end, lineas) -> pd.DataFrame:
+def _weekday_avg(mol, start, end, lineas) -> tuple[pd.DataFrame, int]:
     m = mol[(mol["fecha"] >= start) & (mol["fecha"] <= end)]
     if lineas:
         m = m[m["linea"].isin(lineas)]

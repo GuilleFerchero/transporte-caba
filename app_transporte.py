@@ -4,7 +4,7 @@ import pandas as pd
 import altair as alt
 import streamlit as st
 import folium
-from folium.features import GeoJsonTooltip, GeoJsonPopup
+from folium.features import GeoJsonTooltip
 from streamlit_folium import st_folium
 
 from data_loaders import (
