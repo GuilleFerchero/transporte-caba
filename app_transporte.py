@@ -110,7 +110,10 @@ with col_sel:
     )
     st.caption("La demanda SUBE es siempre AMBA completa; este filtro aplica a recorridos y paradas.")
     routes_df = routes_df[routes_df["jurisdiccion"].isin(jurs)].reset_index(drop=True)
-    lineas = sorted(set(routes_df["linea"]) | stop_lineas, key=int)
+    lineas = sorted(
+        set(routes_df["linea"]) | stop_lineas,
+        key=lambda x: (0, int(x)) if str(x).isdigit() else (1, str(x)),
+    )
 
     linea = st.selectbox(
         "Línea de colectivo",
