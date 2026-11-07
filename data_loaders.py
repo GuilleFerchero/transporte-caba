@@ -101,13 +101,28 @@ BUNDLE_RENABAP_FILE = os.path.join(BUNDLE_DIR, "renabap_amba.geojson.gz")
 
 
 def bundle_available() -> bool:
-    """True si hay un bundle precomputado valido (evita descargar fuentes crudas)."""
+    """True si hay un bundle precomputado valido y completo (evita descargar fuentes crudas)."""
     try:
         with open(BUNDLE_META_FILE, encoding="utf-8") as f:
             meta = json.load(f)
     except (OSError, ValueError):
         return False
-    return meta.get("schema_version") == BUNDLE_SCHEMA_VERSION
+    if meta.get("schema_version") != BUNDLE_SCHEMA_VERSION:
+        return False
+    required = (
+        BUNDLE_ROUTES_FILE,
+        BUNDLE_STOPS_FILE,
+        BUNDLE_SUBE_MENSUAL_FILE,
+        BUNDLE_SUBE_DIARIO_FILE,
+        BUNDLE_MOLINETES_FILE,
+        BUNDLE_SUBTE_LINES_FILE,
+        BUNDLE_SUBTE_STATIONS_FILE,
+        BUNDLE_FFCC_LINES_FILE,
+        BUNDLE_FFCC_STATIONS_FILE,
+        BUNDLE_COMUNAS_FILE,
+        BUNDLE_RENABAP_FILE,
+    )
+    return all(os.path.exists(p) for p in required)
 
 
 def _bundle_token() -> str:
