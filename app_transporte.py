@@ -35,8 +35,7 @@ from data_loaders import (
     _metric_box_html,
     _delta_pill_html,
     THEME_CSS,
-    SUBE_MONTHLY_FILE,
-    SUBE_SOURCE_FILES,
+    sube_available,
     AMBA_BUS_BOUNDS,
     OSM_STOP_RADIUS_M,
     CHOROPLETH_BINS,
@@ -96,7 +95,7 @@ stop_lineas = set(stops_df["linea"])
 
 sube_token = _sube_source_token()
 sube_all = pd.DataFrame()
-if os.path.exists(SUBE_MONTHLY_FILE) or any(os.path.exists(p) for p in SUBE_SOURCE_FILES):
+if sube_available():
     sube_all = load_sube_transactions(sube_token)
 
 col_sel, col_info = st.columns([1, 3])

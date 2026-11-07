@@ -1251,6 +1251,15 @@ SUBE_SOURCE_FILES = [SUBE_USOS_2024_FILE, SUBE_USOS_2025_FILE, SUBE_USOS_2026_FI
 SUBE_AGG_SCHEMA_VERSION = 2
 
 
+def sube_available() -> bool:
+    """True si hay datos SUBE en el bundle o en los archivos crudos."""
+    if bundle_available() and os.path.exists(BUNDLE_SUBE_MENSUAL_FILE):
+        return True
+    return os.path.exists(SUBE_MONTHLY_FILE) or any(
+        os.path.exists(p) for p in SUBE_SOURCE_FILES
+    )
+
+
 def _sube_source_token() -> str:
     return _data_token(SUBE_SOURCE_FILES)
 

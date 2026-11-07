@@ -35,8 +35,7 @@ from data_loaders import (
     JUR_COLOR,
     FFCC_COLOR,
     LINE_COLORS,
-    SUBE_MONTHLY_FILE,
-    SUBE_SOURCE_FILES,
+    sube_available,
     app_header_html,
     make_map,
     tema_mapa_selector,
@@ -385,7 +384,7 @@ st.markdown(
 st_folium(m, width="100%", height=650, returned_objects=["last_object_clicked", "last_clicked"], key="acceso_map")
 
 if bar_id is not None:
-    sube_ok = os.path.exists(SUBE_MONTHLY_FILE) or any(os.path.exists(p) for p in SUBE_SOURCE_FILES)
+    sube_ok = sube_available()
     if sube_ok:
         with st.spinner("Cruzando demanda SUBE de las líneas cercanas..."):
             sube = load_sube_transactions(_sube_source_token())
