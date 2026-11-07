@@ -1,5 +1,7 @@
 import copy
 import os
+from collections import Counter
+
 import pandas as pd
 import numpy as np
 import streamlit as st
@@ -142,8 +144,12 @@ with st.sidebar:
 
     barrio_labels = {}
     barrio_label_of_id = {}
-    for _, r in ren_centroids_full.iterrows():
-        label = f"{r['barrio']} · {r['partido']}"
+    base_labels = [
+        f"{r['barrio']} · {r['partido']}" for _, r in ren_centroids_full.iterrows()
+    ]
+    label_counts = Counter(base_labels)
+    for (_, r), base in zip(ren_centroids_full.iterrows(), base_labels):
+        label = base if label_counts[base] == 1 else f"{base} (id {int(r['id'])})"
         barrio_labels[label] = int(r["id"])
         barrio_label_of_id[int(r["id"])] = label
 
