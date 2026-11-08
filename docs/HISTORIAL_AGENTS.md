@@ -1,0 +1,624 @@
+# Historial y contexto detallado del proyecto
+
+Este archivo conserva el contenido extenso que antes vivía en el `AGENTS.md`
+raíz. El `AGENTS.md` actual quedó reducido a lo que un agente necesita siempre;
+acá están el detalle, las fuentes, las lecciones y los pendientes.
+
+Última revisión: 2026-11-08, contrastada con los tres entrypoints,
+`data_loaders.py`, `build_data_bundle.py`, `check_bundle_parity.py`, el bundle
+commiteado y `requirements.txt`.
+
+## Correcciones de referencias obsoletas
+
+- **`_is_caba_sube_row` no existe** en el código actual. La regla vigente de
+  identificación de líneas SUBE del AMBA es `SUBE_LINEA_RE` (vectorizada) y
+  `_is_amba_sube_code()` (versión por fila), ambas en `data_loaders.py`.
+  Se aplican en `_read_sube_daily_all()`.
+- **`backup/app.py` y `app.py` ya no existen.** `backup/app.py` se eliminó en
+  el commit `6056ec1` ("Limpieza: quitar backup/app.py, imports y constantes
+  sin usar..."). El `app.py` histórico fue refactorizado a
+  `app_transporte.py`. No hay que asumir que esos archivos están en el repo.
+- **`estaciones-de-ferrocarril.geojson`** es el nombre del recurso remoto de BA
+  Data; el archivo local es `data/ffcc_estaciones.geojson`.
+- **Nombres exactos del bundle**: `subte_lines.parquet`,
+  `subte_stations.parquet`, `ffcc_lines.parquet`, `ffcc_stations.parquet`
+  (la forma vieja `subte_lines/subte_stations/...` era una descripción, no una
+  ruta).
+- **Conteos verificados** contra el bundle actual: 2.199 recorridos (1.104
+  CABA + 459 municipales + 36 nacionales + 600 provinciales), 57.370 km,
+  11.461 paradas, 1.457.749 filas de molinetes, 502.303.045 viajes, 88
+  estaciones de molinetes (81 con coordenadas), 79 líneas de subte, 86
+  estaciones de subte, 23 líneas de ferrocarril, 230 estaciones de ferrocarril,
+  15 comunas y 1.356 barrios RE-NABAP del AMBA.
+- **`load_renabap_centroids()`** devuelve un DataFrame vacío si no puede cargar
+  RE-NABAP, pero no emite `st.warning` por sí misma. El warning aparece en
+  `_build_sube_aggregates()` y en los loaders que usan `_load_geojson_safe()`.
+- **Texto desactualizado en `app_acceso.py`**: la metodología visible todavía
+  dice "~1.274 recorridos AMBA"; el dato real actual es 2.199. Es un texto de
+  la app, no una constante de datos.
+- **Versiones de dependencias**: `requirements.txt` fija `requests==2.34.2`
+  (no 2.32.3), `pyarrow==25.0.1`, `streamlit==1.63.0`, `folium==0.20.0`,
+  `streamlit-folium==0.27.4`, `pandas==3.0.5`, `numpy==2.5.2` y
+  `altair==6.2.2`.
+
+## Descripción
+
+Dashboard interactivo en **Streamlit + Folium** para visualizar líneas de
+colectivo y sus paradas en la **Ciudad Autónoma de Buenos Aires y el Área
+Metropolitana de Buenos Aires (AMBA)**, usando **datos abiertos** del Gobierno
+de la Ciudad (BA Data) y la Secretaría de Transporte (RMBA).
+
+## Estado actual (detalle completo)
+
+- **Bundle precomputado `data_bundle/`**: los datos derivados que usan las apps
+  se generan con `build_data_bundle.py` y se commitean al repo (~9 MB, parquet
+  zstd + geojson gzip). Como Streamlit Cloud clona el repo, las apps arrancan
+  **sin descargar las ~420 MB de fuentes crudas por sesión** (era el motivo por
+  el que Cloud se colgaba en cada cold start). Los loaders son *bundle-first*:
+  si `data_bundle/bundle_meta.json` existe con el `schema_version` correcto no
+  se descargan SUBE crudo ni zips de molinetes ni geojsons RMBA; si falta o el
+  schema cambia, fallback al flujo clásico (`data/` local o descarga).
+- **Tres apps separadas** comparten un módulo de datos común:
+  - `app_transporte.py` → análisis de **transporte público** (recorridos,
+    paradas, demanda SUBE, subte, ferrocarril). Es el `app.py` histórico
+    refactorizado (el `app.py` ya no existe).
+  - `app_acceso.py` → análisis de **acceso a la ciudad desde barrios populares**
+    (cobertura RE-NABAP de colectivo/subte/ferro, KPIs de cobertura, resumen por
+    partido).
+  - `app_subte.py` → análisis de **viajes del Subte por molinete** (SBASE/BA
+    Data): mapa de estaciones coloreadas y escaladas por viajes (con popup),
+    comparación interanual (año y último mes completo), slider de franja horaria
+    que recolorea todo, hora pico automática y perfiles horarios. No llama a
+    `ensure_local_data()` (evita la descarga de ~190 MB de SUBE/AMBA): usa solo
+    los loaders geojson on-demand.
+  - `data_loaders.py` → **módulo compartido**: constantes/URLs, colores/libreas,
+    funciones de geometría (haversine, simplificación), carga y transformación
+    de todos los datasets (cacheadas con `@st.cache_data`), dibujo en Folium,
+    helpers de formato y el CSS `THEME_CSS`.
+  - `backup/app.py` **existió** como referencia histórica, pero fue eliminado en
+    `6056ec1`. No está en el repo actual.
+- `app_transporte.py`: hay un selector de **línea de colectivo** (dropdown con
+  ~304 líneas AMBA + opción "Todas las líneas") y filtros de recorrido/sentido.
+- **Filtro de jurisdicciones** (multiselect `CABA / NACIONAL / PROVINCIAL /
+  MUNICIPAL`, default las 4; reemplaza al viejo toggle AMBA/CABA). Filtra
+  recorridos, control de líneas del dropdown, mapas y captions; la **demanda
+  SUBE es siempre AMBA** (se muestra un caption aclarándolo). `osm_force` aplica
+  a cualquier línea sin paradas CABA, sin importar el filtro. En "Todas las
+  líneas" el `fit_bounds` se calcula al bounding box de los recorridos visibles
+  (fallback `AMBA_BUS_BOUNDS`).
+- Hay dos **overlays opcionales**: `Subte (CABA)` (líneas + estaciones) y
+  `Ferrocarril (AMBA)` (líneas `ambalineas.geojson` + estaciones
+  `estaciones-de-ferrocarril.geojson` de BA Data, 230 paradas con nombre).
+- Al seleccionar una línea: dibuja los **recorridos** (PolyLines coloreados por
+  librea), muestra las **paradas** como CircleMarker con popup (dirección,
+  barrio, comuna) y ajusta el zoom a los límites de la línea.
+- **Paradas del conurbano**: las líneas que no tienen paradas CABA registradas
+  (p.ej. RMBA municipales 500+ o provinciales que no entran a Capital)
+  **fuerzan la capa OSM**: se cuentan y dibujan automáticamente las paradas de
+  OpenStreetMap a ≤150 m del recorrido, sin tildar el checkbox.
+- En "Todas las líneas" (AMBA): dibuja los ~2199 recorridos con **geometrías
+  simplificadas** (`coords_simple`, decimación a ~30 m) como **una única capa
+  `folium.GeoJson`** (`routes_to_geojson` + `GeoJsonTooltip` con
+  línea/ramal/sentido); se colorean **por jurisdicción**: librea para
+  CABA/nacional, verde provincial, naranja municipal (57.370 km acumulados, con
+  `fit_bounds` al AMBA). En CABA sigue el **choropleth de demanda estimada por
+  comuna** (`comunas.geojson` de BA Data): reparte los usos AMBA de cada línea
+  entre sus paradas de CABA proporcional al nº de paradas.
+- KPIs por línea (reemplazan a las viejas cajas de distancias
+  Euclidiana/Manhattan): **longitud del recorrido** (precomputada como
+  `longitud_m` en `build_routes_table`), **usos por día** (promedio del último
+  mes completo) y **usos por km anual** (productividad = total 12 meses / km
+  ida+vuelta). La caja SUBE conserva el promedio mensual, el total de 12 meses y
+  3 pills: vs año anterior, vs mes anterior y **vs mismo mes del año anterior**.
+- **Vista "Tipo de día"**: barra con el promedio de usos diarios de la línea por
+  `Día hábil / Sábado / Domingo / Feriado` (últimos 12 meses completos), usando
+  el agregado diario. Los feriados nacionales (inamovibles, trasladables y
+  puentes) se toman de `FERIADOS_ARG` (set estático 2024-2027, fuente
+  api.argentinadatos.com); al entrar un año nuevo hay que actualizarlo.
+- **Vista "Semana tipo"**: barra con el promedio de usos diarios por día de la
+  semana (Lunes a Domingo) del mismo período de 12 meses.
+- **Ranking de productividad AMBA**: tabla ordenable por **usos por km anual**,
+  usos por día, usos 12m o variación interanual, con filtro de jurisdicción
+  (CABA/NACIONAL, PROVINCIAL, MUNICIPAL) y selector top 10/20/50/Todas;
+  exportable en CSV. El km de cada línea es la suma de `longitud_m` (ida+vuelta)
+  de sus recorridos; usos por km = total 12m / km.
+- **Cobertura RE-NABAP**: el análisis completo vive en **`app_acceso.py`** (el
+  checkbox de `app_transporte.py` solo dibuja los polígonos como capa
+  informativa). En `app_acceso.py` el checkbox de barrios populares está
+  disponible **siempre** (no requiere seleccionar un colectivo) y mide los
+  barrios cuya **frontera** cae a ≤300 m de la red de colectivo AMBA completa
+  y/o de las redes de **subte y ferrocarril** activadas (familias y ~personas =
+  ×4), los muestra en el mapa coloreados por estado (verde = con cobertura,
+  rojo = sin) y arma un resumen por partido descargable en CSV. La cobertura usa
+  **todos** los recorridos AMBA simultáneamente; por eso se calcula con una
+  **grilla espacial** (`build_point_grid` + `_grid_matches`, células de 100 m)
+  en vez de `stops_near_route` (que tardaba ~6 min para todo el AMBA; la grilla
+  lo hace en ~1 s). Para no saturar el mapa, el colectivo está **oculto por
+  defecto**; al seleccionar un barrio (select de la sidebar o **clic sobre el
+  polígono** en el mapa, vía `last_object_clicked`/`last_clicked` de `st_folium`
+  + point-in-polygon `_find_barrio_at`) se dibujan solo las líneas de transporte
+  cercanas: colectivo a ≤ `BARRIO_BUS_RADIUS_M` (500 m) y subte/ferrocarril a
+  ≤ `BARRIO_RAIL_RADIUS_M` (1200 m), con sus estaciones recortadas a las líneas
+  visibles. Los polígonos RE-NABAP se dibujan **debajo** de las líneas para no
+  taparlas (orden de dibujo) y los trazos de colectivo llevan popup con
+  línea/ramal/sentido (`draw_route(..., popup=...)`).
+- El gráfico y las cajas usan los últimos 12 meses; se descartan las líneas sin
+  datos y el mes en curso si está incompleto.
+
+## Fuentes de datos (BA Data, licencia CC-BY-2.5-AR)
+
+- **Recorridos**: `Colectivos: recorridos` (GeoJSON
+  `recorrido-colectivos.geojson`, ~11,8 MB)
+  - 1104 features `MultiLineString`.
+  - Propiedades útiles: `linea` (string "001"), `recorrido`, `sentido`
+    (IDA/VUELTA), `modalidad`, `desde`, `hasta`.
+- **Paradas**: `Colectivos: paradas` (GeoJSON
+  `paradas-de-colectivo.geojson`, ~3,3 MB)
+  - 6962 features `Point` (coordenadas lon/lat en la geometría).
+  - Propiedades: `DIRECCION`, `BARRIO`, `COMUNA` y campos `L1`..`L6` (líneas que
+    pasan por esa parada, string o null). Hay un valor corrupto `'V'` en algún
+    campo L* que se descarta (solo se aceptan valores `isdigit()`).
+- **Comunas**: `Comunas` (GeoJSON `comunas.geojson`, ~0,6 MB, 15 features con
+  propiedad `comuna` 1..15). Usado para el choropleth de demanda por comuna.
+  Ojo: el archivo trae **BOM**, por eso `load_geojson` lee con `utf-8-sig`.
+- **Recorridos RMBA (Secretaría de Transporte, datos.transporte.gob.ar)** —
+  dataset `recorridos-de-lineas-de-transporte-rmba-jn`:
+  - `rmba_nacional.geojson` (1172 features, JURISDICCI "NACIONAL",
+    `LINEA`/`RAMAL`/`SENTIDO` IDA o VUELTA) → recurso
+    `84947471-9c1e-4a23-8a2e-03a8c87c056f`.
+  - `rmba_provincial.geojson` (600 features, JURISDICCI "PROVINCIAL", `SENTIDO`
+    0/1) → recurso `f95e25bc-a6b2-4a78-a04b-35fa437be96b`.
+  - `rmba_municipal.geojson` (459 features `LineString`, `LINEA` 501..557) →
+    recurso `f0f3791a-addc-4143-bb95-ef0e8bca5bd8`.
+  - URL base de recursos:
+    `https://datos.transporte.gob.ar/dataset/f87b93d4-ade2-44fc-a409-d3736ba9f3ba/resource/<id>/download/<archivo>`.
+  - **Geometrías con >2 dims**: hay que sanitizar a `(lon, lat)` (2 dims) y
+    aceptar `LineString` y `MultiLineString`. Se usa `_clean_route_coords()`.
+  - Aportan **170 líneas nuevas** (7 nacionales + 106 provinciales + 57
+    municipales); 161 de ellas tienen datos SUBE. La dedupe contra BA Data es
+    **solo por número de línea** (`_norm_rmba_linea`, primer grupo de dígitos +
+    `zfill(3)`): BA Data ya cubre todo el AMBA con geometría casi idéntica a la
+    nacional RMBA, así que si una línea está en BA Data se descarta su geometría
+    RMBA. **Entre features de RMBA no se deduplica nada**: cada feature es una
+    variante de recorrido (línea × ramal × sentido) y hay 34 combinaciones
+    repetidas con geometrías **distintas** (tramos parciales vs. completos).
+    Deduplicar por línea se llevaba el 84% de los recorridos y el 95% de los
+    kilómetros del conurbano (ver "Lecciones aprendidas").
+- **Subte/ferrocarril (RMBA)** — `subte_lineas.geojson` (79, `LINEASUB`),
+  `subte_estaciones.geojson` (86, `ESTACION`/`LINEA`), `ffcc_lineas.geojson`
+  (23, `Linea`/`Descrip`). Las **estaciones de ferrocarril** se toman de BA Data
+  (`estaciones-ferrocarril`, 230 paradas con `nombre`/`linea`/`ramal`/`long`/`lat`),
+  no del KML `ambapuntos.kml` de RMBA (302 puntos sin nombres).
+- **Transacciones SUBE**: Secretaría de Transporte
+  (datos.transporte.gob.ar) → "SUBE - Cantidad de transacciones (usos) por
+  fecha" (CSV diario por línea, `dat-ab-usos-2024.csv`, `dat-ab-usos-2025.csv`
+  y `dat-ab-usos-2026.csv`, ~61 MB, ~65 MB y ~47 MB).
+  - Una fila por día-línea. Columnas: `DIA_TRANSPORTE`, `NOMBRE_EMPRESA`,
+    `LINEA`, `AMBA` (SI/NO), `TIPO_TRANSPORTE`, `JURISDICCION`, `PROVINCIA`,
+    `MUNICIPIO`, `CANTIDAD`, `DATO_PRELIMINAR`. Cobertura diaria de todo el
+    país; se filtra `AMBA=SI` + `TIPO_TRANSPORTE=COLECTIVO`.
+  - Identificación de líneas del AMBA: se decide **por la grafía de `LINEA`**,
+    no por `JURISDICCION` ni por `PROVINCIA`/`MUNICIPIO` (ver "Lecciones
+    aprendidas"). Regla en `SUBE_LINEA_RE` / `_is_amba_sube_code()`:
+    - Acepta las dos familias que usa el dataset: prefijos `CABA_LINEA_*`,
+      `BSAS_LINEA*` (a veces sin separador: `BSAS_LINEA303`),
+      `BS_AS_LINEA_*`, `BS_ASLINEA_*`, `LINEA_BSAS_*`; y las que arrancan con la
+      palabra `LINEA` seguida de dígitos (`LINEA 1`, `LINEA_504B`,
+      `LINEA_506_AMBA`, `LINEA_540_BSAS`).
+    - Rechaza cualquier grafía con `RZ` (Zárate, colisiona por número con las
+      líneas 1-11 de CABA), los códigos pelados sin `LINEA` (`1`, `2A`, `2B`,
+      que son de Campana) y las grafías sin dígitos (`LINEA OESTE`,
+      `NORTE MUNICIPAL`).
+    - Efecto medido sobre la ventana de 24 meses del agregado: **304 → 320
+      líneas** y **+199.431.170 usos (+4,13%)**. Antes se perdían 16 líneas del
+      AMBA (14 con recorrido: 326, 410, 429, 521, 526, 527, 540, 542, 548, 550,
+      551, 552, 553 y 630) por usar una lista de prefijos incompleta.
+    - `check_bundle_parity.py` fija esta regla con casos concretos (A1), así que
+      agregar una grafía nueva al dataset es un test que falla.
+  - Coherencia verificada contra el dataset de demanda de BA Data (mediana
+    +0,17%); las diferencias >5% son líneas largas de conurbano donde el dato
+    nacional suma el AMBA completo, lo cual es el objetivo.
+  - Hay recursos anuales; si el dataset renueva años hay que agregar/actualizar
+    las URLs en `SUBE_USOS_2024_URL`/`SUBE_USOS_2025_URL`/`SUBE_USOS_2026_URL`.
+    El loader lee 2024+2025+2026 y conserva **24 meses** (para comparaciones
+    interanuales); el gráfico y el total de la caja usan siempre los últimos 12.
+- **Viajes del Subte por molinete (SBASE/BA Data)** — dataset
+  `subte-viajes-molinetes`: pasajeros por molinete y estación en rangos de
+  **15 min**, con tipo de pasaje. Años 2013–2026 en **ZIP por año** descargables
+  de la CDN:
+  `https://cdn.buenosaires.gob.ar/datosabiertos/datasets/sbase/subte-viajes-molinetes/molinetes-<YYYY>.zip`.
+  (`data.buenosaires.gob.ar` bloquea requests sin **User-Agent de navegador** —WAF—;
+  la CDN funciona con cualquier UA. IDs de recurso (2024=`9faf4137-…`,
+  2025=`0d689701-…`, 2026=`f4689712-…`) solo sirven para el `package_show` de la
+  API CKAN; `datastore_search` da 404 para estos ZIP.)
+  - Detalle del esquema (2024-2026 idéntico): CSV con **cada línea entera entre
+    comillas**, separador `;`, BOM, fecha `D/M/YYYY`. Columnas:
+    `FECHA;DESDE;Hasta>;LINEA;MOLINETE;ESTACION;pax_pagos;pax_pases_pagos;pax_franq;pax_TOTAL`.
+    Hay un archivo por mes y grupo de líneas: `<YYYYMM>_PAX15min-ABC-…`, `-DEH-`,
+    `-PM-` (2024: solo diciembre lleva la etiqueta `INCLUYEOTROMODOSDEPAGO`).
+    Premetro = `LineaPM` (sin geometría en el geojson).
+  - **Codificación**: 2024/2025 se leen con `latin-1`, 2026 con `utf-8-sig`
+    (`_decode_molinete`). Se agrega a **hora** usando el inicio `DESDE` y
+    `pax_TOTAL` (todas las modalidades de pago). Se descartan estaciones
+    `#n/d`, `null`, `prueba` y vacías. 2026 es parcial (enero–junio). Ver
+    `_ingest_molinete_zip()`.
+  - Últimos agregados: 1.457.749 filas, 502.303.045 viajes, 2024–2026, 88
+    estaciones (81 con coords). La estación se normaliza por **alias**
+    (`MOLINETES_STATION_ALIAS`, p.ej. `CARLOS PELLEGRINI→C. PELLEGRINI`,
+    `FLORES→SAN JOSE DE FLORES`, `PALERMO→PALERMO - ACHÁVAL RODRÍGUEZ`,
+    `HUMB——→HUMBERTO 1`) + `_canon_molinete_station` (alias → geojson →
+    fallback a strip del `Plataforma .B`/` E`).
+- URL de descarga (fallback):
+  - https://cdn.buenosaires.gob.ar/datosabiertos/datasets/transporte-y-obras-publicas/colectivos-recorridos/recorrido-colectivos.geojson
+  - https://cdn.buenosaires.gob.ar/datosabiertos/datasets/transporte-y-obras-publicas/colectivos-paradas/paradas-de-colectivo.geojson
+  - https://cdn.buenosaires.gob.ar/datosabiertos/datasets/innovacion-transformacion-digital/comunas/comunas.geojson
+  - https://archivos-datos.transporte.gob.ar/upload/Dat_Ab_Usos/dat-ab-usos-2024.csv (usos SUBE 2024)
+  - https://archivos-datos.transporte.gob.ar/upload/Dat_Ab_Usos/dat-ab-usos-2025.csv (usos SUBE 2025)
+  - https://archivos-datos.transporte.gob.ar/upload/Dat_Ab_Usos/dat-ab-usos-2026.csv (usos SUBE 2026)
+
+## Arquitectura de datos (importante)
+
+- Los datos viven en la carpeta **`data/`** (local, NO versionada en git, está
+  en `.gitignore`).
+  - `data/paradas-de-colectivo.geojson`, `data/recorrido-colectivos.geojson`,
+    `data/comunas.geojson`
+  - `data/dat-ab-usos-2024.csv`, `data/dat-ab-usos-2025.csv` y
+    `data/dat-ab-usos-2026.csv`
+  - `data/sube_usos_mensuales.csv` y `data/sube_usos_diarios.csv`
+    (**agregados derivados**, se regeneran solos; ~4 MB en total vs ~165 MB de
+    los CSVs originales)
+  - `data/rmba_nacional.geojson`, `data/rmba_provincial.geojson`,
+    `data/rmba_municipal.geojson`
+  - `data/subte_lineas.geojson`, `data/subte_estaciones.geojson`,
+    `data/ffcc_lineas.geojson`, `data/ffcc_estaciones.geojson` (BA Data, con
+    nombres)
+  - `data/molinetes/molinete_<YYYY>.zip` (ZIP fuente de SBASE;
+    `_ingest_molinete_zip` baja vía CDN si el ZIP de un año no existe
+    localmente), `data/molinetes_subte.csv` (**agregado por hora/estación**,
+    ~48 MB, `linea, fecha, hora, estacion, viajes`) y
+    `data/molinetes_agg_meta.json` (sidecar `built_after`/`schema_version`).
+- **Bundle precomputado `data_bundle/`** (versionado en git, ~9 MB, START
+  liviano en Cloud): generado con `build_data_bundle.py` usando los mismos
+  builders de `data_loaders.py` (no duplica lógica). Contiene:
+  - `routes.parquet` (2.199 recorridos AMBA completos con `coords`/
+    `coords_simple`/`longitud_m`/`jurisdiccion`, zstd; 1.104 de BA Data + 1.095
+    de RMBA), `stops.parquet` (11.461 filas)
+  - `sube_mensual.parquet` + `sube_diario.parquet` (agregados SUBE ya listos)
+  - `molinetes.parquet` (agregado por hora/estación, 1.457.749 filas → 2,4 MB
+    en vez de 206 MB de zips)
+  - `subte_lines.parquet`, `subte_stations.parquet`, `ffcc_lines.parquet`,
+    `ffcc_stations.parquet`
+  - `comunas.geojson.gz` y `renabap_amba.geojson.gz` (lectura/escritura con
+    `gzip`)
+  - `bundle_meta.json` con `schema_version` (`BUNDLE_SCHEMA_VERSION = 2`; la v1
+    perdía los recorridos RMBA y devolvía `fecha` como texto).
+  Los loaders leen el bundle con `_read_parquet_bundle()` (que convierte las
+  columnas de geometría a listas Python planas; pyarrow las devuelve como
+  `ndarray` anidado y eso rompía `if not coords`/`_flatten_network`). Si no hay
+  bundle o el schema cambió, las funciones degradan al flujo clásico.
+  Para refrescar: `venv\Scripts\python build_data_bundle.py` → commitear
+  `data_bundle/` (los `data/` crudos NO se commitean).
+- `ensure_local_data()` crea `data/` y, si falta algún archivo, lo descarga de
+  BA Data (las fuentes AMBA —RMBA, subte/ferro— son tolerantes: si fallan, la
+  app degrada a CABA). Si el bundle está disponible, retorna sin descargar nada.
+- `load_geojson(path, url)` lee el archivo local con `utf-8-sig` (tolera BOM,
+  ej. comunas); si no existe, descarga.
+- **Agregados SUBE**: `_build_sube_aggregates()` lee los CSV diarios
+  (`AMBA=SI` + colectivo + líneas CABA por patrón de código) una sola vez y
+  escribe `sube_usos_mensuales.csv` (24 meses, formato largo
+  `linea, fecha, transacciones`) y `sube_usos_diarios.csv` (últimos 12 meses
+  `linea, fecha, transacciones, tipo_dia` con
+  `Día hábil/Sábado/Domingo/Feriado`; los feriados salen de `FERIADOS_ARG`).
+  El sidecar `sube_agregados_meta.json` guarda `built_after` y
+  `schema_version` (`SUBE_AGG_SCHEMA_VERSION = 2`): si el esquema cambia (p.ej.
+  nueva categoría de día) se regeneran los agregados aunque los fuentes no hayan
+  cambiado. La frescura se resuelve con `_sube_aggregates_fresh()`: compara el
+  `built_after` del sidecar contra el `mtime` máximo de los CSVs fuente. Si
+  cambian los fuentes (año nuevo, mes nuevo) se regeneran. Se descarta el mes en
+  curso si está incompleto (último día < fin de mes). La línea se normaliza con
+  `zfill(3)`.
+- `load_sube_transactions(token)` y `load_sube_daily(token)` leen los agregados
+  (rápido) y se cachean con `@st.cache_data`; el `token = _sube_source_token()`
+  (mtimes de fuentes) invalida la caché cuando cambian los datos. El
+  gráfico/boxes usan `tail(12)`; las pills interanuales comparan los últimos 12
+  vs los 12 previos y el último mes vs el mismo mes del año anterior.
+- **Agregados molinetes**: `_build_molinetes_aggregates()` ingesta los ZIP
+  descargados (parsea cada fila, normaliza estación) y escribe
+  `data/molinetes_subte.csv` (una fila por `linea, fecha, hora, estacion`) y el
+  sidecar `molinetes_agg_meta.json`. La frescura usa
+  `_molinetes_aggregates_fresh()` (compara `built_after` del sidecar contra el
+  mtime del ZIP más nuevo; si solo hay un ZIP nuevo, no re-ingesta los otros
+  años). `load_molinetes(token)` con `token = _molinetes_source_token()` lee el
+  CSV agregado (~1 s, en vez de ~300 s de parsear los ZIP). `helper de nombres`:
+  `load_subte_stations_geo()` devuelve una fila por estación del geojson con
+  `nombre` normalizado (mismas reglas que molinetes) + lat/lon/línea.
+- `build_routes_table` precomputa por recorrido: **`longitud_m`** (haversine
+  punto a punto) y **`coords_simple`** (decimado ~30 m, usado solo en "Todas las
+  líneas"). Así los km del caption y el mapa agregado NO recomputan por rerun
+  (antes se sumaba con numpy por punto en cada rerun).
+- `build_routes_table_amba(routes_fc, sources)` consolida BA Data + RMBA. La
+  dedupe es **solo por número de línea y contra BA Data** (`_norm_rmba_linea`,
+  primer grupo de dígitos + `zfill(3)`): la geometría RMBA nacional es casi
+  idéntica a BA Data, así que solo se agregan las líneas que BA Data no tiene;
+  **todos** los features de esas líneas se conservan (no hay dedupe intra-RMBA,
+  ver "Fuentes de datos"). Si `rows` queda vacío devuelve `base` tal cual,
+  porque `pd.concat` con un frame vacío degrada `longitud_m` a `object` y rompe
+  los KPIs. Columnas: `linea, recorrido, sentido, modalidad, desde, hasta,
+  coords, coords_simple, longitud_m, jurisdiccion`
+  (`CABA | NACIONAL | PROVINCIAL | MUNICIPAL`).
+- **Paradas OSM / bbox**: `OSM_AMBA_BBOX = "(-35.20,-59.45,-34.00,-57.85)"`
+  cubre el AMBA oeste completo (La Plata, Moreno, Ezeiza). Si se agrandó el bbox
+  y quedó un `paradas_amba_osm.geojson` viejo localmente, borrarlo para que
+  re-descargue.
+- Todo el procesamiento está cacheado con `@st.cache_data` (tablas de stops y
+  routes en pandas), para no reparsear los 15 MB en cada rerun.
+- `data/` está en `.gitignore`. Para regenerar/testear offline borrar archivos
+  localmente y la app descarga sola.
+
+## Tema visual compartido (las 3 apps)
+
+- **Basemap con toggle**: las tres apps usan
+  `make_map(location, zoom_start, theme=...)` + `tema_mapa_selector()` de
+  `data_loaders.py`. El default es **"Oscuro"**. Cada tema de `MAP_THEMES` trae
+  una lista de `layers` (base + etiquetas) y se dibujan con `add_basemap()`, que
+  además inyecta `MAP_DARK_CSS` (popups, tooltips, barra de zoom, atribución,
+  escala y leyenda de Folium en la tonalidad del app).
+  - **Oscuro** = Esri *World Dark Gray Canvas* (base + reference), **Claro** =
+    Esri *World Light Gray Canvas*, **Calles (OSM)** = `tile.openstreetmap.de`
+    (nombres de calle reales, para leer direcciones).
+  - **Por qué Esri y no CARTO**: `basemaps.cartocdn.com` (CARTO
+    `dark_all`/`light_all`) y `tile.openstreetmap.org` se quedan **colgados sin
+    completar** en algunas redes — el `<img>`/tile nunca dispara load ni error y
+    el mapa queda en blanco. Se detectó probando los tiles uno por uno en el
+    navegador del usuario (2026-09-26). `services.arcgisonline.com` y
+    `tile.openstreetmap.de` sí cargan. **Ojo: la URL de Esri es `{z}/{y}/{x}`
+    (y antes de x) y su natively-máx es z16** (`max_native_zoom=16` +
+    `max_zoom=19`), por eso se ven algo suaves al alejar.
+  - Si algún día vuelve a fallar un basemap, la forma rápida de verificarlo es
+    una página local con un `<img>` por proveedor y cartel de OK/FALLO (sin
+    DevTools: en algunas máquinas F12 no abre). Ojo con el `img.src`: si no se
+    asigna, la página queda en "cargando..." para siempre y parece un problema
+    de red que no existe.
+- **Header común**: `app_header_html(kicker, title, subtitle, chips)` reemplaza
+  los `st.title`/`st.subheader` de las tres apps (kicker = fuente, título,
+  bajada y una fila de chips con el estado del dataset). Los estilos viven en
+  `THEME_CSS`.
+- **Rampas de color** (para no depender de las rampas de `branca` de folium, que
+  son claras y con poco contraste en oscuro): `RAMP_VIAJES` (secuencial,
+  viajes), `RAMP_DELTA` (divergente, variación interanual) y
+  `RAMP_CHOROPLETH` (comunas). Helpers: `ramp_color()` (interpolación hex),
+  `log_norm()` (log10 normalizado), `marker_radius()` (radio ∝ √t para que el
+  *área* acompañe la escala), `ramp_legend_html()` (gradiente + labels + nota) y
+  `marker_outline(theme)`.
+- **Ojo al pintar sobre oscuro**: en `app_transporte.py` las paradas de la línea
+  seleccionada usan `fill_color` = color de la librea (antes `#111111`, que
+  desaparecía sobre el basemap oscuro) y el borde sale de
+  `marker_outline(tema_mapa)`. El choropleth de comunas usa `RAMP_CHOROPLETH` y
+  bordes de baja opacidad.
+- `app_subte.py` (rediseño 2026): color y tamaño por estación con **escala
+  logarítmica recortada en p5/p95** (los viajes están muy concentrados: la
+  estación más cargada multiplica por ~9 a la mediana) y un modo **"Δ vs año
+  anterior"** que cambia el color a la rampa divergente (el tamaño sigue siendo
+  el volumen). El **slider de franja** devuelve una tupla; si llega un escalar
+  se interpreta como "todo el día" (por robustez, no debería pasar en el
+  browser).
+- Nota: el caption final de `app_subte.py` todavía dice "Mapa base:
+  OpenStreetMap / CARTO", pero el basemap real es Esri/OSM.de según `MAP_THEMES`.
+
+## Detalles técnicos / lecciones aprendidas
+
+- **Los iconos de Material de Streamlit se ven como texto**: el woff2 que sirve
+  (`static/media/MaterialSymbols-Rounded.*.woff2`) es un subset **sin los
+  glyphs**, así que los ligatures no se sustituyen y el sidebar muestra
+  `keyboard_double_arrow_left` (y el expander `keyboard_arrow_right`) en vez del
+  ícono — y nada de CSS lo arregla, porque el ligature es texto plano (medido:
+  303px con la fuente Material, 284px con Calibri, o sea texto en ambos casos).
+  Workaround en `THEME_CSS`: `font-size: 0` + `mask` con un chevron SVG inline
+  en `stSidebarCollapseButton` y en el summary del `stExpander` (que rota 180°
+  vía `details[open]`, porque el `open` va en el `<details>`, no en el div con
+  `data-testid="stExpander"`). El selector está acotado a esos dos contenedores
+  para no tapar ningún otro icono.
+- **Medir CSS en vez de mirar capturas**: con Chrome headless (`--dump-dom`) +
+  un `<script>` que escribe `getBoundingClientRect().width` o
+  `getComputedStyle().transform` en el DOM se verifica un `mask`/rotación en
+  segundos, sin F12 ni screenshots borrosos de Streamlit. Ojo: pasar el stdout
+  por `2>&1` a una variable vacía la salida; encadenar con `| Select-String`
+  funciona.
+- **Sin reruns al interactuar con el mapa**: `st_folium` por defecto devuelve el
+  estado del mapa (bounds, zoom, clics) en cada interacción y eso provoca que
+  Streamlit re-ejecute el script. Se corrigió con `returned_objects=[]` en la
+  llamada `st_folium(m, width="100%", height=650, returned_objects=[])`.
+  (Commiteado en `4e4013a`.)
+- **Loaders bundle-first**: `load_routes_df`/`load_stops_df`/`load_sube_*`/
+  `load_molinetes`/subte-ffcc/`load_comunas`/`_load_renabap_geojson` leen
+  `data_bundle/` (`_read_parquet_bundle` + `bundle_available()`) y solo caen al
+  flujo crudo si no hay bundle o el schema cambió. Los tokens de caché
+  (`_data_token`) usan el `mtime` de `bundle_meta.json` cuando hay bundle (si
+  no, los `mtime` de los fuentes), así un bundle nuevo invalida la caché aunque
+  los `data/` crudos no existan en Cloud. `bus_network` construye su red con
+  `load_routes_df()`. Parques a cuidar: pyarrow devuelve las columnas de
+  geometría como `ndarray` anidados (rompía `if not coords`/`_flatten_network`);
+  se convierten a listas Python con `_deep_python`.
+- Normalización de líneas en SUBE nacional: los códigos son inconsistentes entre
+  años y jurisdicciones. La regla vigente es **solo por grafía** (`SUBE_LINEA_RE`
+  / `_is_amba_sube_code`, ver "Fuentes de datos"), NO por `JURISDICCION` ni por
+  `PROVINCIA`/`MUNICIPIO`. Medido: `PROVINCIA=JN` son 2,94 B usos válidos del
+  AMBA (no es "interior") y `MUNICIPIO=SD` concentra 3,33 B usos, así que
+  ninguna whitelist de esas columnas sirve. NO filtrar solo con `AMBA=SI`:
+  colisionan líneas homónimas de Mercedes/Zárate (ej. `LINEA 1`, `RZ-1`). El
+  número de línea se extrae como el primer grupo de dígitos
+  (`re.search(r"\d+")`).
+- **Deduplicar recorridos RMBA es un error, no una limpieza**: cada feature es
+  una variante (línea × ramal × sentido) y 34 combinaciones están repetidas
+  **con geometría distinta** (tramos parciales vs. completos). Deduplicar por
+  número de línea dejó 1.274 filas / 40.058 km en vez de 2.199 / 57.370 km: se
+  perdía el 95% de los km del conurbano y la productividad "usos por km" salía
+  inflada ~6x. Además el KPI depende de que `longitud_m` siga siendo `float`:
+  `pd.concat` con un frame vacío la degrada a `object`.
+- **No cortar el barrido de una grilla al primer anillo con hit**: en
+  `_grid_matches` había un `break` en el loop de `di` que dejaba de buscar
+  celdas vecinas después del primer hit. El KPI de cobertura
+  (`renabap_covered_ids`, que solo mira `query_hit`) no se enteraba, pero
+  `lines_near_barrio` perdía el 65% de las líneas cercanas a 500 m. Si una
+  función usa la grilla, hay que comprobar qué parte del resultado usa.
+- Normalización de líneas: en recorridos la línea es "001" (3 dígitos), en
+  paradas puede ser "22" o "1". Se normaliza con `str(linea).zfill(3)` en ambas
+  tablas.
+- Tabla de paradas se arma en formato largo (1 fila por parada × línea que la
+  sirve) y se deduplica por `(linea, lat, lon)`.
+- El mapa se reinicia en cada selector de línea (sin `key` en st_folium) para
+  que se remonte con la línea nueva.
+- **Cobertura y score de proximidad**: el filtro espacial por radio
+  (`stops_near_route`, haversine bacheada) es genérico: se reusa tanto para las
+  paradas OSM del conurbano (≤150 m, sobre ~1 línea/recorrido) como para la
+  cobertura RE-NABAP. Para RE-NABAP la cercanía se mide contra los **vértices de
+  la frontera** de cada polígono (`load_renabap_points`), NO contra el centroide:
+  barrios alargados (p.ej. Villa Itatí) bordean la ruta pero su centroide cae a
+  >300 m y quedarían afuera. El centroide se usa solo para ubicar el marcador
+  (`load_renabap_centroids`, promedio de vértices). En `app_acceso.py` la
+  cobertura se mide contra **todo el AMBA a la vez** (~444k puntos de recorridos
+  × ~22k vértices RE-NABAP); `stops_near_route` tardaba ~6 min, así que se usa
+  `renabap_covered_ids` (grilla de 100 m sobre los puntos de red y búsqueda
+  local de ≤±celdas vecinas para cada vértice de barrio, ~1 s).
+- **Cobertura fija con caché tipo-token**:
+  `bus_network`/`subte_network`/`ffcc_network` y
+  `renabap_covered_ids`/`lines_near_barrio` se cachean con `@st.cache_data`
+  pasando **tokens derivados de los `mtime`** de los fuentes (nunca DataFrames
+  con columnas de listas como `coords`), evitando re-embeber ~444k coordenadas
+  por rerun y el warning "unhashable type: 'list'".
+  `lines_near_barrio(bar_id, radius_m, network)` devuelve los índices de fila de
+  las líneas de esa red a ≤radio del barrio (el orden de filas coincide con el
+  `routes_df` de la app).
+- **Choropleth por comuna**: es una **estimación** (reparto proporcional al nº de
+  paradas de CABA de cada línea), no demanda real por parada; el expander "Sobre
+  los datos" lo aclara. El campo `COMUNA` de paradas trae un valor corrupto `76`
+  que se descarta filtrando a 1..15. `folium.Choropleth` recibe
+  `threshold_scale` con cuantiles para acotar la leyenda.
+- **Agregados en disco**: los CSVs originales (~165 MB) solo se leen la primera
+  vez (o cuando cambian); después se usan `sube_usos_mensuales.csv` (~160 KB) y
+  `sube_usos_diarios.csv` (~4 MB). La caché de `st.cache_data` se invalida con
+  un token derivado de los `mtime` de los fuentes (`_sube_source_token`), porque
+  `st.cache_data` no observa archivos por sí solo.
+- **Descargas opcionales resilientes (Cloud)**: en Streamlit Cloud el storage es
+  efímero, así que cada sesión re-descarga los datos. La descarga de paradas OSM
+  (Overpass) solía correr al arranque dentro de `ensure_local_data()` y un error
+  HTTP del endpoint público (`overpass.kumi.systems` devuelve 429/502) rompía
+  toda la app con pantalla roja. Ahora: (a) el OSM se descarga **lazy** recién
+  al tildar el checkbox (con fallback a `overpass-api.de` vía `OSM_STOPS_URLS`);
+  (b) los CSVs SUBE y el RE-NABAP de arranque degradan con warning en vez de
+  lanzar; (c) las funciones de lectura devuelven DataFrames vacíos si fallan
+  (`_build_sube_aggregates` emite el `st.warning`; `load_sube_daily`,
+  `load_sube_transactions` y `load_renabap_centroids` devuelven vacío sin
+  warning propio). Solo las fuentes core (paradas, recorridos, comunas) siguen
+  fallando duro.
+
+## Cómo correr y verificar (detalle)
+
+```
+streamlit run app_transporte.py   # Transporte público (recorridos + demanda SUBE)
+streamlit run app_acceso.py       # Acceso a la ciudad / cobertura RE-NABAP
+streamlit run app_subte.py        # Viajes del Subte por molinete (SBASE)
+```
+
+- `backup/app.py` **ya no existe**; era la referencia histórica de la app
+  original y se eliminó en `6056ec1`. Tampoco existe `app.py`.
+- App suele correrse en puerto 8501: `streamlit run app_transporte.py --server.port 8501`
+- Para probar sin navegador se usa AppTest:
+  ```python
+  from streamlit.testing.v1 import AppTest
+  at = AppTest.from_file("app_acceso.py", default_timeout=300)
+  at.run()
+  print(at.exception)  # debe ser vacío
+  ```
+- Verificar sintaxis:
+  `python -m py_compile data_loaders.py app_transporte.py app_acceso.py app_subte.py build_data_bundle.py check_bundle_parity.py`
+- **Verificar el bundle**: `venv\Scripts\python check_bundle_parity.py` (sale
+  con código 1 si algo no cuadra, así sirve como paso de CI). Hace dos cosas:
+  (A) invariantes baratos que cazan los bugs caros — las grafías que acepta/
+  rechaza el filtro SUBE, que las 14 líneas del AMBA antes perdidas tengan
+  demanda, que `load_sube_daily().fecha` sea `datetime` (no texto), que
+  `longitud_m` siga siendo `float`, que `coords` sean listas de Python, y que
+  `_grid_matches` barra todas las celdas vecinas; (B) paridad bundle ↔ crudo:
+  reconstruye las tablas geográficas desde `data/` con los mismos builders y las
+  compara contra los parquet. **No** reingiere los agregados (reingerir los ZIP
+  de molinetes tarda ~300 s y escribiría en `data/`).
+- Refrescar datos: `venv\Scripts\python build_data_bundle.py` (regenera
+  `data_bundle/` desde los `data/` crudos) y luego `git add data_bundle/` +
+  commit. Si cambiaron los builders hay que **subir `BUNDLE_SCHEMA_VERSION`**
+  (en `data_loaders.py`) para que las apps en Cloud no lean un bundle viejo, y
+  correr `check_bundle_parity.py`.
+
+## Git / GitHub
+
+- Repo: `https://github.com/GuilleFerchero/transporte-caba.git` (rama `main`)
+- Historial original documentado:
+  - `38a6525` Primer commit: estructura inicial
+  - `241d660` Agregar app.py (mapa base)
+  - `b10849a` Visualización de líneas de colectivo y paradas con datos de BA Data
+  - `1afb41d` Lectura local de `data/` con descarga como respaldo; `data/` en .gitignore
+  - `4e4013a` Evolutivo mensual de transacciones SUBE por línea + distancia en km;
+    fix de reruns `returned_objects=[]`; AGENTS.md
+- El historial actual tiene 34 commits; HEAD es `5ffb38b` ("Ignorar .vscode/").
+  Hitos posteriores relevantes: `6056ec1` (elimina `backup/app.py`),
+  `2db0c0c` (auditoría + smoke test de paridad), `cf17615` (bundle
+  precomputado), `bd26ac0` (rediseño de `app_subte.py` y tema compartido),
+  `736c5c6` (limpieza de imports/funciones), `44383bc`
+  (`bundle_available` valida que existan todos los archivos).
+
+## Entorno
+
+- Windows, shell PowerShell. Python 3.13.2 en local. La app corre en el venv
+  `venv/` del repo. Docker usa `python:3.12-slim`.
+- Librerías fijadas en `requirements.txt`: streamlit 1.63.0, folium 0.20.0,
+  streamlit-folium 0.27.4, pandas 3.0.5, numpy 2.5.2, altair 6.2.2,
+  requests 2.34.2, pyarrow 25.0.1.
+
+## Pendientes / ideas
+
+- Eventualmente: posiciones en tiempo real de colectivos (API de transporte,
+  pero BA Data indica que las APIs/GTFS están suspendidos en revisión).
+- Pulir: en "Todas las líneas" AMBA el render de 2199 recorridos ya se dibuja
+  como una sola capa `folium.GeoJson` (`routes_to_geojson`, –1 capa en vez de
+  ~1274 PolyLines); sigue pendiente evaluar el peso en Cloud del primer render y
+  regenerar `paradas_amba_osm.geojson` si se amplía el bbox.
+- **Usos SUBE por hora (día vs noche)**: descartado por ahora. No existe dataset
+  abierto por hora por línea; lo único horario es el estudio de "un día hábil
+  promedio" por hexágono/modo (sin línea) y "Subte: viajes por molinete" de
+  SBASE (solo subte). Si se quisiera un día, habría que estimar repartiendo el
+  total diario con un perfil horario típico (con disclaimer) o limitarse a
+  subte.
+- **Mantenimiento molinetes (`app_subte.py`)**: al publicarse el ZIP de un año
+  nuevo hay que descargarlo a `data/molinetes/` (o dejar que
+  `_ingest_molinete_zip` lo baje de la CDN) y regenerar el agregado; la app
+  muestra el año más cargado de base (por ahora 2025) y marca como "parcial" los
+  años incompletos. El ZIP de 2026 es parcial (enero–junio).
+- **Acceso desde barrios populares (`app_acceso.py`)**: la grilla
+  `_grid_matches` ya cubre todo el AMBA en ~1 s; ideas a futuro: corredores
+  hacia destinos clave (microcentro, intercambiadores, estaciones terminales),
+  distancia a la estación más cercana por modo, y exportación por barrio (CSV
+  con distancia mínima por red) para organizaciones sociales.
+- Corregir el texto de metodología de `app_acceso.py` que aún dice "~1.274
+  recorridos AMBA" (hoy son 2.199) y el caption de `app_subte.py` que menciona
+  CARTO (el basemap real es Esri/OSM.de).
+
+## Deploy
+
+- Las apps viven en **Streamlit Community Cloud** (`https://share.streamlit.io`,
+  repo `GuilleFerchero/transporte-caba`, rama `main`). Hay **tres entrypoints
+  candidatos**: `app_transporte.py` (transporte público), `app_acceso.py`
+  (acceso a la ciudad) y `app_subte.py` (subte por molinete), cada uno como una
+  app separada del mismo repo.
+  `requirements.txt` fija las versiones del entorno (incluye `pyarrow`,
+  necesario para leer los parquet del bundle). Con `data_bundle/` commiteado el
+  primer render de cada sesión **no descarga nada**: los ~9 MB ya viajan
+  clonados del repo; el free tier sigue suspendiendo la app por inactividad
+  (almacenamiento efímero).
+- **Docker (alternativa a Cloud)**: ya hay `Dockerfile` (python:3.12-slim +
+  `requirements.txt` + healthcheck + `CMD streamlit run app_transporte.py
+  --server.address=0.0.0.0`) y `docker-compose.yml` que monta el volumen
+  nombrado `transporte-data:/app/data` (los datos se descargan **una sola vez**
+  y el arranque queda en segundos, sin límites de memoria ni suspensión por
+  inactividad). Con el bundle commiteado el arranque es instantáneo aunque el
+  volumen esté vacío. Correr con `docker compose up -d --build` y apuntar a
+  `http://localhost:8501`. Para cambio de app, editar el `CMD` del Dockerfile
+  (entrypoints: `app_transporte.py` / `app_acceso.py` / `app_subte.py`).
