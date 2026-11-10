@@ -50,6 +50,10 @@ MESES_ES = {
 COL_VIAJES = "Viajes del período"
 COL_DELTA = "Δ vs año anterior"
 N_TOP = 15
+AVISO_METODOLOGICO = (
+    "Cambio metodológico: desde dic-2024 los datos de molinetes incluyen otros modos de pago; "
+    "la variación interanual 2025 vs 2024 (ene–nov) no es estrictamente comparable."
+)
 
 st.set_page_config(
     page_title="Transporte CABA - Viajes por molinete",
@@ -515,6 +519,13 @@ if es_anio and año_parcial:
         f"El año {base_year} es parcial (datos hasta {b_end:%d/%m/%Y}); la comparación usa el mismo "
         "recorte del año anterior."
     )
+
+comparacion_2025_2024 = base_year == 2025 and ref_year == 2024
+meses_ene_nov = (mes_sel is not None and mes_sel <= 11) or (
+    es_mes and mes_prev_year == 2025 and mes_prev is not None and mes_prev <= 11
+)
+if comparacion_2025_2024 and (es_anio or meses_ene_nov):
+    st.info(AVISO_METODOLOGICO)
 
 # ---------------------------------------------------------------------------
 # KPIs
