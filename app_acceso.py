@@ -472,7 +472,7 @@ with st.expander("Sobre los datos y la metodología"):
         "y opcionalmente subte y/o ferrocarril). Se usan los vértices y no el centroide para no perder barrios "
         "alargados (p.ej. Villa Itatí) que bordean una ruta aunque su centroide quede lejos. Las *personas* son una "
         "estimación gruesa: familias × 4 (excluye otras tipologías). El conteo de las líneas de colectivo usa la "
-        "geometría completa de los ~1.274 recorridos AMBA."
+        f"geometría completa de los {_fmt(len(routes_df))} recorridos AMBA."
     )
     st.markdown(
         "**Nota:** esta app mide *proximidad espacial a la red*, no tiempo de viaje ni frecuencia de servicio. "
