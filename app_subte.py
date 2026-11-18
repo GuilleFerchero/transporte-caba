@@ -802,12 +802,15 @@ if not peak_table.empty:
             return ""
         return f"color: {POS_COLOR};" if v > 0 else (f"color: {NEG_COLOR};" if v < 0 else "")
 
+    peak_display = peak_table.rename(
+        columns={"Viajes AM": "Entradas AM", "Viajes PM": "Entradas PM"}
+    )
     stylo = (
-        peak_table.style.format(
+        peak_display.style.format(
             {"% día AM": "{:.1f}", "% día PM": "{:.1f}", f"Δ vs {ref_year} (%)": "{:+.1f}"}
         )
-        .map(_barra, subset=["Viajes AM"])
-        .map(_barra, subset=["Viajes PM"])
+        .map(_barra, subset=["Entradas AM"])
+        .map(_barra, subset=["Entradas PM"])
         .map(_delta_color, subset=[f"Δ vs {ref_year} (%)"])
     )
     st.dataframe(stylo, width="stretch", hide_index=True, height=460)
@@ -861,8 +864,9 @@ BASEMAP_LABELS = {
     "Calles (OSM)": "OpenStreetMap (OSM.de)",
 }
 
+dias_con_datos = mol.loc[mol["fecha"].between(b_start, b_end), "fecha"].nunique()
 st.caption(
     f"Fuente: SBASE - Buenos Aires Data. Período {b_start:%d/%m/%Y} \u2192 {b_end:%d/%m/%Y} "
-    f"({len(mol['fecha'].unique())} días). Franja horaria {h0:02d}:00\u2013{h1:02d}:00 aplicada a totales y mapa. "
+    f"({dias_con_datos} días con datos). Franja horaria {h0:02d}:00\u2013{h1:02d}:00 aplicada a totales y mapa. "
     f"Mapa base: {BASEMAP_LABELS.get(tema_mapa, tema_mapa)}."
 )
