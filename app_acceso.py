@@ -226,9 +226,9 @@ with k3:
 with k4:
     st.markdown(
         _metric_box_html(
-            "% del AMBA conectado",
+            "% de barrios RE-NABAP cubiertos",
             f"{_fmt_dec(pct)}<small>%</small>",
-            '<span>de los barrios populares analizados</span>',
+            '<span>sin ponderar por familias</span>',
         ),
         unsafe_allow_html=True,
     )
@@ -402,9 +402,9 @@ if bar_id is not None:
             usos_dia = total_usos / 365.0
             st.markdown(
                 _metric_box_html(
-                    "Demanda de las líneas a ≤ 500 m",
+                    f"Demanda SUBE AMBA de las líneas a ≤ {BARRIO_BUS_RADIUS_M} m",
                     f"{_fmt(total_usos)}<small>usos/12m</small>",
-                    f'<span>≈ {_fmt(usos_dia)} usos/día · {len(near_lineas)} línea(s)</span>',
+                    f'<span>≈ {_fmt(usos_dia)} usos/día · {len(near_lineas)} línea(s) · no del barrio</span>',
                 ),
                 unsafe_allow_html=True,
             )
@@ -472,12 +472,15 @@ with st.expander("Sobre los datos y la metodología"):
         "y opcionalmente subte y/o ferrocarril). Se usan los vértices y no el centroide para no perder barrios "
         "alargados (p.ej. Villa Itatí) que bordean una ruta aunque su centroide quede lejos. Las *personas* son una "
         "estimación gruesa: familias × 4 (excluye otras tipologías). El conteo de las líneas de colectivo usa la "
-        f"geometría completa de los {_fmt(len(routes_df))} recorridos AMBA."
+        f"geometría completa de los {_fmt(len(routes_df))} recorridos AMBA. "
+        f"Los radios de {_fmt(BARRIO_BUS_RADIUS_M)} m (colectivo) y {_fmt(BARRIO_RAIL_RADIUS_M)} m "
+        "(subte/ferrocarril) que filtran las líneas mostradas en el mapa son solo de visualización; "
+        f"la cobertura se calcula siempre con {_fmt(RENABAP_RADIUS_M)} m desde los vértices de la frontera."
     )
     st.markdown(
         "**Nota:** esta app mide *proximidad espacial a la red*, no tiempo de viaje ni frecuencia de servicio. "
         "Un barrio puede quedar cerca de una línea y aun así tener mala conexión al centro de la ciudad. "
-        "La *demanda de las líneas a ≤ 500 m* es la suma de los usos SUBE (AMBA) de esas líneas, "
+        f"La *demanda de las líneas a ≤ {BARRIO_BUS_RADIUS_M} m* es la suma de los usos SUBE (AMBA) de esas líneas, "
         "un proxy de cuánto transporte circula al borde del barrio. "
         "En una próxima etapa se podrán agregar corredores hacia destinos clave (microcentro, intercambiadores) "
         "y tiempos de viaje."
