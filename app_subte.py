@@ -853,8 +853,14 @@ with st.expander("Sobre los datos"):
 """
     )
 
+BASEMAP_LABELS = {
+    "Oscuro": "Esri World Dark Gray",
+    "Claro": "Esri World Light Gray",
+    "Calles (OSM)": "OpenStreetMap (OSM.de)",
+}
+
 st.caption(
     f"Fuente: SBASE - Buenos Aires Data. Período {b_start:%d/%m/%Y} \u2192 {b_end:%d/%m/%Y} "
     f"({len(mol['fecha'].unique())} días). Franja horaria {h0:02d}:00\u2013{h1:02d}:00 aplicada a totales y mapa. "
-    "Mapa base: OpenStreetMap / CARTO."
+    f"Mapa base: {BASEMAP_LABELS.get(tema_mapa, tema_mapa)}."
 )
