@@ -47,7 +47,7 @@ MESES_ES = {
     7: "Julio", 8: "Agosto", 9: "Septiembre", 10: "Octubre", 11: "Noviembre", 12: "Diciembre",
 }
 
-COL_VIAJES = "Viajes del período"
+COL_VIAJES = "Entradas del período"
 COL_DELTA = "Δ vs año anterior"
 N_TOP = 15
 AVISO_METODOLOGICO = (
@@ -56,7 +56,7 @@ AVISO_METODOLOGICO = (
 )
 
 st.set_page_config(
-    page_title="Transporte CABA - Viajes por molinete",
+    page_title="Transporte CABA - Entradas por molinete",
     page_icon="\U0001F687",
     layout="wide",
 )
@@ -245,7 +245,7 @@ def _perfil_chart(df: pd.DataFrame, color: str, h0: int, h1: int, am_h: int, pm_
             y=alt.Y("viajes:Q", title=None, axis=alt.Axis(format="~s", labelColor=INK_DIM, gridColor="#242b3b")),
             tooltip=[
                 alt.Tooltip("hora:O", title="Hora"),
-                alt.Tooltip("viajes:Q", title="Viajes promedio", format=",.0f"),
+                alt.Tooltip("viajes:Q", title="Entradas promedio", format=",.0f"),
             ],
         )
         .properties(height=height)
@@ -267,7 +267,7 @@ def _ranking_chart(df: pd.DataFrame, height: int) -> alt.Chart:
             tooltip=[
                 alt.Tooltip("Estación:N", title="Estación"),
                 alt.Tooltip("linea_txt:N", title="Línea"),
-                alt.Tooltip("viajes:Q", title="Viajes", format=",.0f"),
+                alt.Tooltip("viajes:Q", title="Entradas", format=",.0f"),
                 alt.Tooltip("share:Q", title="% del total", format=".1f"),
                 alt.Tooltip("delta:Q", title=f"Δ vs año ant.", format="+.1f"),
             ],
@@ -318,6 +318,8 @@ with st.spinner("Cargando datos de molinetes..."):
 if mol.empty:
     st.error("No se pudieron cargar los datos de molinetes (SBASE). Verificá la conexión o los archivos en data/molinetes/.")
     st.stop()
+
+ultimo_dato = mol["fecha"].max()
 
 years = sorted(int(y) for y in mol["fecha"].dt.year.unique())
 years_base = [y for y in years if y - 1 in years]
@@ -503,8 +505,8 @@ franja_txt = "todo el día" if (h0 == 0 and h1 == 23) else f"{h0:02d}:00–{h1:0
 st.markdown(
     app_header_html(
         "SBASE · Buenos Aires Data",
-        "Subte CABA · Viajes por molinete",
-        "Pasajeros por estación, hora pico y evolución interanual",
+        "Subte CABA · Entradas por molinete",
+        "Entradas por estación, hora pico y evolución interanual",
         chips=[
             f"Período <b>{periodo_txt}</b>",
             f"Franja <b>{franja_txt}</b>",
@@ -514,10 +516,10 @@ st.markdown(
     ),
     unsafe_allow_html=True,
 )
-if es_anio and año_parcial:
-    st.caption(
-        f"El año {base_year} es parcial (datos hasta {b_end:%d/%m/%Y}); la comparación usa el mismo "
-        "recorte del año anterior."
+if b_start.year <= ultimo_dato.year <= b_end.year and ultimo_dato < _window(int(ultimo_dato.year))[1]:
+    st.warning(
+        f"{ultimo_dato.year} es un año parcial: los datos de molinetes llegan hasta el "
+        f"{ultimo_dato:%d/%m/%Y}. La comparación interanual usa el mismo recorte del año anterior."
     )
 
 comparacion_2025_2024 = base_year == 2025 and ref_year == 2024
@@ -533,7 +535,7 @@ if comparacion_2025_2024 and (es_anio or meses_ene_nov):
 k1, k2, k3, k4 = st.columns(4)
 with k1:
     _kpi(
-        f"Viajes · {periodo_txt}",
+        f"Entradas · {periodo_txt}",
         f"{_fmt(tot_base)}",
         f"<span>Franja {franja_txt}</span>",
         f'{_delta_pill_html(delta_year)}<span style="color:{INK_FAINT};font-size:13px;">vs {ref_year}</span>',
@@ -559,14 +561,14 @@ with k3:
     _kpi(
         "Pico mañana",
         f"{peak_am_h:02d}:00<small>–{peak_am_h + 1:02d}:59</small>" if peak_am_h >= 0 else "s/d",
-        "<span>Viajes/día hábil</span>" + f'<span class="num">{_fmt(peak_am_v)}</span>',
+        "<span>Entradas/día hábil</span>" + f'<span class="num">{_fmt(peak_am_v)}</span>',
         f'<span class="delta-pill flat">{_fmt_dec(peak_am_share)}% del día</span>',
     )
 with k4:
     _kpi(
         "Pico tarde",
         f"{peak_pm_h:02d}:00<small>–{peak_pm_h + 1:02d}:59</small>" if peak_pm_h >= 0 else "s/d",
-        "<span>Viajes/día hábil</span>" + f'<span class="num">{_fmt(peak_pm_v)}</span>',
+        "<span>Entradas/día hábil</span>" + f'<span class="num">{_fmt(peak_pm_v)}</span>',
         f'<span class="delta-pill flat">{_fmt_dec(peak_pm_share)}% del día</span>',
     )
 
@@ -618,7 +620,7 @@ for _, r in merged.iterrows():
         f'background:{color_linea};margin-right:6px;"></span>'
     )
     filas = f"<b>{_clean_label(r['estacion'])}</b>{punto}<span style='color:{INK_FAINT};'>Línea {_clean_label(r['linea'])}</span>"
-    cuerpo = f"Viajes {periodo_txt}<br><b style='font-size:15px;'>{_fmt(viajes)}</b> {_delta_span(r['delta_year'])}"
+    cuerpo = f"Entradas {periodo_txt}<br><b style='font-size:15px;'>{_fmt(viajes)}</b> {_delta_span(r['delta_year'])}"
     if es_anio and mes_sec is not None:
         cuerpo += f"<br>Mes {MESES_ES.get(mes_sec, mes_sec)}: <b>{_fmt(r.get('viajes_m', 0))}</b> {_delta_span(r.get('delta_month'))}"
     popup_html = f"{filas}<hr>{cuerpo}{picos}"
@@ -630,7 +632,7 @@ for _, r in merged.iterrows():
         fill=True,
         fill_color=fill,
         fill_opacity=0.92,
-        tooltip=f"{_clean_label(r['estacion'])} · L{_clean_label(r['linea'])} · {_fmt(viajes)} viajes",
+        tooltip=f"{_clean_label(r['estacion'])} · L{_clean_label(r['linea'])} · {_fmt(viajes)} entradas",
         popup=folium.Popup(popup_html, max_width=290),
     ).add_to(m)
     n_marcadores += 1
@@ -672,14 +674,14 @@ if color_por == COL_VIAJES:
         if (n_bajo or n_alto) else "escala logarítmica (percentiles 5–95)"
     )
     leyenda = ramp_legend_html(
-        f"Viajes por estación · {periodo_txt}",
+        f"Entradas por estación · {periodo_txt}",
         RAMP_VIAJES,
         labels=[_fmt(vmin), _fmt(math.sqrt(vmin * vmax)) if vmax > vmin else _fmt(vmax), _fmt(vmax)],
         note=f"Franja {franja_txt} · {nota_rango}",
     )
 else:
     n_delta_clip = int((dy_all > dmax).sum()) if dy_all.notna().any() else 0
-    nota_delta = "El tamaño del círculo sigue siendo el volumen de viajes"
+    nota_delta = "El tamaño del círculo sigue siendo el volumen de entradas"
     if n_delta_clip:
         nota_delta += f"; {n_delta_clip} estación/es con |Δ| mayor toman el extremo del color"
     leyenda = ramp_legend_html(
@@ -727,7 +729,7 @@ with col_rank:
             width="stretch",
         )
         st.caption(
-            f"Las {len(top)} estaciones con más viajes del período. "
+            f"Las {len(top)} estaciones con más entradas del período. "
             f"Tamaño del círculo en el mapa: área proporcional al valor (raíz del valor normalizado)."
         )
 
@@ -761,9 +763,9 @@ with c2:
         width="stretch",
     )
 st.caption(
-    "Promedio de pasajeros por hora de los días hábiles (lunes a viernes no feriados) del período "
+    "Promedio de entradas por hora de los días hábiles (lunes a viernes no feriados) del período "
     "seleccionado, sin aplicar el recorte horario: la franja elegida aparece sombreada y las "
-    "líneas punteadas marcan el bloque de 2 horas con más pasajeros de la mañana y de la tarde."
+    "líneas punteadas marcan el bloque de 2 horas con más entradas de la mañana y de la tarde."
 )
 
 # ---------------------------------------------------------------------------
@@ -816,9 +818,9 @@ if not peak_table.empty:
         mime="text/csv",
     )
     st.caption(
-        f"Pico = bloque de 2 horas consecutivas con más pasajeros del día hábil promedio, "
+        f"Pico = bloque de 2 horas consecutivas con más entradas del día hábil promedio, "
         f"detectado por separado para la mañana (00–11) y la tarde (12–23). "
-        f"Δ vs {ref_year} compara los viajes de todo el período seleccionado contra el mismo "
+        f"Δ vs {ref_year} compara las entradas de todo el período seleccionado contra el mismo "
         "período del año previo."
     )
 
@@ -831,20 +833,20 @@ with st.expander("Sobre los datos"):
 - **Fuente**: SBASE · "Subte: Viajes Molinetes" (Buenos Aires Data, CC-BY-2.5-AR). Datos por
   **molinete, estación y rango de 15 minutos**; aquí se suman a **hora** y se agrega el tipo de
   pasaje (`pax_TOTAL`).
-- Años cargados: **{", ".join(str(y) for y in years)}**. {f"{base_year} es parcial (hasta {b_end:%d/%m/%Y})." if año_parcial else ""}
+- Años cargados: **{", ".join(str(y) for y in years)}**. {f"{base_year} es parcial (datos hasta {ultimo_dato:%d/%m/%Y})." if base_year == ultimo_dato.year and ultimo_dato < _window(base_year)[1] else ""}
 - El **"vs año anterior"** compara el mismo período del año previo (recorte equivalente cuando el
   año es parcial) y aplica los mismos filtros de franja horaria y líneas.
 - La **hora pico** se detecta por separado para la **mañana** (horas 00–11) y la **tarde**
-  (horas 12–23): en cada franja se elige el **bloque de 2 horas consecutivas** con más pasajeros
+  (horas 12–23): en cada franja se elige el **bloque de 2 horas consecutivas** con más entradas
   en el promedio de **días hábiles** (lunes a viernes no feriados) del período seleccionado,
-  y se informa el **% de los viajes del día** que mueve esa ventana.
+  y se informa el **% de las entradas del día** que mueve esa ventana.
 - El **color y el tamaño** de los marcadores usan una **escala logarítmica** recortada en los
-  percentiles 5 y 95: los viajes están muy concentrados (la estación más cargada multiplica por ~9
+  percentiles 5 y 95: las entradas están muy concentradas (la estación más cargada multiplica por ~9
   a la mediana) y una escala lineal dejaría a casi todas las estaciones del mismo color. El radio
   es la raíz del valor normalizado, así el *área* del círculo acompaña la escala sin exagerar las
   diferencias. Las estaciones fuera de los percentiles comparten el extremo del color.
 - En el modo **"Δ vs año anterior"** el color pasa a ser una escala divergente centrada en 0
-  (verde = sube, rojo = baja) y el tamaño sigue siendo el volumen de viajes, para no perder de
+  (verde = sube, rojo = baja) y el tamaño sigue siendo el volumen de entradas, para no perder de
   vista el peso de la estación.
 - Estaciones del Premetro (linea PM) y de la extensión reciente de la Línea H no tienen
   coordenadas en el dataset oficial y no se muestran en el mapa (sí cuentan en los totales y la tabla).
