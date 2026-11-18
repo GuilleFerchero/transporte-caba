@@ -89,7 +89,10 @@ for message in ensure_local_data():
 
 with st.sidebar:
     tema_mapa = tema_mapa_selector()
-    st.caption("El basemap oscuro acompaña al tema de la app; el claro sirve para leer calles y referencias.")
+    st.caption(
+        "Basemaps: Esri World Dark/Light Gray y Calles (OpenStreetMap/OSM.de). "
+        "El oscuro acompaña al tema de la app; el claro y Calles sirven para leer calles y referencias."
+    )
 
 stop_lineas = set(stops_df["linea"])
 
@@ -277,9 +280,9 @@ with col_info:
             with k2:
                 st.markdown(
                     _metric_box_html(
-                        "Usos por día",
+                        "Usos SUBE AMBA por día",
                         f'{_fmt(usos_dia)}<small>usos</small>',
-                        f'<span>Prom. de {_fmt(sube_12["transacciones"].iloc[-1])} usos en {ult_mes:%m/%Y}</span>',
+                        f'<span>Prom. de {_fmt(sube_12["transacciones"].iloc[-1])} usos AMBA en {ult_mes:%m/%Y}</span>',
                     ),
                     unsafe_allow_html=True,
                 )
