@@ -1595,9 +1595,10 @@ def app_header_html(kicker: str, title: str, subtitle: str = "", chips=()) -> st
     (período, filtros activos) en una sola banda."""
     chips_html = "".join(f'<span class="chip">{c}</span>' for c in chips)
     sub_html = f'<p class="app-subtitle">{subtitle}</p>' if subtitle else ""
+    kicker_html = f'<div class="app-kicker">{kicker}</div>' if kicker else ""
     return (
         '<div class="app-header">'
-        f'<div class="app-kicker">{kicker}</div>'
+        f"{kicker_html}"
         f'<h1 class="app-title">{title}</h1>'
         f"{sub_html}"
         + (f'<div class="app-meta">{chips_html}</div>' if chips_html else "")
@@ -2357,8 +2358,9 @@ def _delta_pill_html(pct) -> str:
 # ---------------------------------------------------------------------------
 THEME_CSS = """
 <style>
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap");
 html, body, .stApp, .stApp * {
-    font-family: "Calibri", "Segoe UI", Tahoma, Arial, sans-serif !important;
+    font-family: "Inter", system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif !important;
 }
 /* Streamlit dibuja los iconos como ligatures de "Material Symbols Rounded",
    pero el woff2 que sirve (static/media/MaterialSymbols-Rounded.*.woff2) no
@@ -2394,21 +2396,22 @@ html, body, .stApp, .stApp * {
 }
 .app-header .app-kicker {
     color: #4c8bf5;
-    font-size: 12px;
+    font-size: 11.5px;
     font-weight: 700;
-    letter-spacing: 1.3px;
+    letter-spacing: 1.2px;
     text-transform: uppercase;
 }
 .app-header .app-title {
     color: #ffffff;
-    font-size: 40px;
+    font-size: clamp(32px, 3.2vw, 40px);
     font-weight: 800;
+    letter-spacing: -0.02em;
     line-height: 1.08;
     margin: 2px 0 0 0;
 }
 .app-header .app-subtitle {
     color: #aeb8cc;
-    font-size: 18px;
+    font-size: 17px;
     margin: 4px 0 0 0;
 }
 .app-header .app-meta {
@@ -2422,7 +2425,7 @@ html, body, .stApp, .stApp * {
     border: 1px solid #2d3548;
     border-radius: 20px;
     padding: 3px 11px;
-    font-size: 12.5px;
+    font-size: 12px;
     color: #c6cede;
     white-space: nowrap;
 }
@@ -2456,7 +2459,7 @@ div.ramp-legend .legend-ticks span {
     position: absolute;
     transform: translateX(-50%);
     color: #aeb8cc;
-    font-size: 11.5px;
+    font-size: 12px;
     font-variant-numeric: tabular-nums;
 }
 div.ramp-legend .legend-note {
@@ -2473,21 +2476,22 @@ div.metric-box {
 }
 div.metric-box .mb-label {
     color: #8b95ab;
-    font-size: 12px;
+    font-size: 11.5px;
     font-weight: 600;
     letter-spacing: .7px;
     text-transform: uppercase;
 }
 div.metric-box .mb-value {
     color: #ffffff;
-    font-size: 52px;
+    font-size: clamp(38px, 4vw, 52px);
     font-weight: 700;
+    letter-spacing: -0.025em;
     line-height: 1.05;
     margin-top: 4px;
     font-variant-numeric: tabular-nums;
 }
 div.metric-box .mb-value small {
-    font-size: 22px;
+    font-size: 20px;
     font-weight: 600;
     color: #aeb8cc;
     margin-left: 6px;
@@ -2496,7 +2500,7 @@ div.metric-box .mb-sub {
     margin-top: 12px;
     border-top: 1px solid #2d3548;
     padding-top: 10px;
-    font-size: 15px;
+    font-size: 13.5px;
     color: #aeb8cc;
     display: flex;
     justify-content: space-between;
@@ -2505,6 +2509,10 @@ div.metric-box .mb-sub {
 div.metric-box .mb-sub .num {
     color: #ffffff;
     font-weight: 700;
+    font-variant-numeric: tabular-nums;
+}
+div[data-testid="stDataFrame"] td,
+div[data-testid="stDataFrame"] th {
     font-variant-numeric: tabular-nums;
 }
 div.tx-detached {
@@ -2519,7 +2527,7 @@ div.mb-delta {
 span.delta-pill {
     border-radius: 20px;
     padding: 4px 11px;
-    font-size: 13px;
+    font-size: 12.5px;
     font-weight: 700;
     white-space: nowrap;
 }

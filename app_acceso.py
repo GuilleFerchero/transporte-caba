@@ -1,4 +1,5 @@
 import copy
+import json
 import os
 from collections import Counter
 
@@ -11,6 +12,7 @@ from folium.features import GeoJsonTooltip, GeoJsonPopup
 
 from data_loaders import (
     ensure_local_data,
+    BUNDLE_META_FILE,
     load_routes_df,
     load_subte_lines,
     load_subte_stations,
@@ -56,6 +58,16 @@ NO_COBERTO_COLOR = "#d62728"
 BARRIO_BUS_RADIUS_M = 500
 BARRIO_RAIL_RADIUS_M = 1200
 
+
+def _bundle_cut_label() -> str:
+    try:
+        with open(BUNDLE_META_FILE, encoding="utf-8") as f:
+            fecha = json.load(f).get("built_at", "")[:10]
+    except (OSError, ValueError):
+        fecha = ""
+    return f"corte bundle {fecha}" if fecha else "sin fecha de bundle"
+
+
 st.set_page_config(
     page_title="Acceso a la Ciudad AMBA",
     page_icon="🏘️",
@@ -70,14 +82,15 @@ with st.spinner("Cargando datos..."):
 
 st.markdown(
     app_header_html(
-        "Buenos Aires Data · Secretaría de Transporte",
+        "",
         "Acceso a la Ciudad desde Barrios Populares",
         "Cobertura de colectivo, subte y ferrocarril y acceso directo al centro en los barrios RE-NABAP del AMBA",
         chips=[
-            f"Barrios RE-NABAP <b>{_fmt(len(ren_centroids_full))}</b>",
+            f"AMBA total · {_fmt(len(ren_centroids_full))} barrios RE-NABAP",
             f"Red de colectivo <b>{_fmt(len(routes_df))} recorridos</b>",
             f"Umbral de cercanía <b>{_fmt_dec(RENABAP_RADIUS_M)} m</b>",
             f"Acceso directo <b>{CENTER_LABEL}</b>",
+            f"RE-NABAP 2023 · {_bundle_cut_label()}",
         ],
     ),
     unsafe_allow_html=True,
@@ -124,11 +137,11 @@ def _renabap_fc_with_estado(centro_ids: frozenset, perif_ids: frozenset):
         except (TypeError, ValueError):
             eid = None
         if eid in centro_ids:
-            estado = "con acceso al centro"
+            estado = f"Con acceso al centro (comunas {', '.join(str(c) for c in CENTER_COMUNA_IDS)})"
         elif eid in perif_ids:
-            estado = "solo periférico"
+            estado = "Solo periférico"
         else:
-            estado = "sin cobertura"
+            estado = "Sin cobertura"
         feature["properties"]["estado"] = estado
     return out
 
@@ -265,7 +278,7 @@ with k1:
     st.markdown(
         _metric_box_html(
             "Barrios con acceso al centro",
-            f"{_fmt(con_centro)}<small>/ {_fmt(total_barrios)}</small>",
+            f'<span style="color:{CENTER_COLOR};">{_fmt(con_centro)}<small>/ {_fmt(total_barrios)}</small></span>',
             f'<span>a ≤ {RENABAP_RADIUS_M} m y línea directa a {CENTER_LABEL}</span>',
         ),
         unsafe_allow_html=True,
@@ -307,11 +320,10 @@ if show_ffcc:
 if suffix:
     red_label += " + " + " y ".join(suffix)
 st.caption(
-    f"Un barrio cuenta como <b>con acceso al centro</b> cuando la <b>frontera</b> de su polígono cae a "
-    f"≤ {RENABAP_RADIUS_M} m de al menos una línea de {red_label} que entra en <b>{CENTER_LABEL}</b>. "
-    f"Si está cerca de la red pero ninguna de esas líneas llega al centro, queda como <b>solo periférico</b>. "
-    f"El acceso directo no considera transbordos. El conteo usa los vértices del polígono "
-    f"(barrios alargados bordean la red aunque su centroide quede lejos).",
+    f"<b>Con acceso al centro</b>: la frontera del polígono cae a ≤ {RENABAP_RADIUS_M} m de una línea de "
+    f"{red_label} que entra en {CENTER_LABEL}. Si está cerca pero ninguna línea llega al centro, es "
+    "<b>solo periférico</b>; si no hay red cerca, <b>sin cobertura</b>. "
+    "Sin transbordos; km y share son intensidad, no frecuencia.",
     unsafe_allow_html=True,
 )
 
@@ -338,9 +350,9 @@ renabap_fc = _renabap_fc_with_estado(centro_ids, perif_ids)
 if renabap_fc is not None:
     def style_fn(feature):
         estado = feature["properties"].get("estado")
-        if estado == "con acceso al centro":
+        if estado.startswith("Con acceso"):
             color = CENTER_COLOR
-        elif estado == "solo periférico":
+        elif estado.startswith("Solo periférico"):
             color = PERIF_COLOR
         else:
             color = NO_COBERTO_COLOR
@@ -360,7 +372,7 @@ if renabap_fc is not None:
         style_function=style_fn,
         tooltip=GeoJsonTooltip(
             fields=["nombre_barrio", "departamento", "estado"],
-            aliases=["Barrio", "Partido", ""],
+            aliases=["Barrio", "Partido", "Estado"],
             localize=True,
         ),
         popup=GeoJsonPopup(
@@ -373,7 +385,7 @@ if renabap_fc is not None:
                 "Familias aprox.", "", "ID RE-NABAP",
             ],
             localize=True,
-            style="font-size:12px;",
+            style="font-size:12.5px; line-height:1.45;",
         ),
         name="Barrios populares RE-NABAP (AMBA)",
     ).add_to(m)
@@ -398,7 +410,7 @@ if not bus_routes.empty:
             fields=["linea", "ramal", "sentido", "desde", "hasta"],
             aliases=["Línea", "Ramal", "Sentido", "Desde", "Hasta"],
             localize=True,
-            style="font-size:12px;",
+            style="font-size:12.5px; line-height:1.45;",
         ),
         name="Recorridos de colectivo",
     ).add_to(m)
@@ -458,8 +470,14 @@ st.caption(
     unsafe_allow_html=True,
 )
 
+if show_bus and bar_id is None:
+    st.caption(
+        "Aviso: se están dibujando todas las líneas de colectivo del AMBA; el mapa puede demorar. "
+        "Elegí un barrio o desactivá la opción para aligerarlo."
+    )
+
 st.markdown(
-    f'<div style="display:flex;gap:24px;margin:8px 0;color:#aeb8cc;font-size:14px;">'
+    f'<div style="display:flex;gap:24px;margin:8px 0;color:#aeb8cc;font-size:13px;line-height:1.4;">'
     f'<span><span style="display:inline-block;width:14px;height:14px;background:{CENTER_COLOR};'
     f'border-radius:2px;margin-right:6px;"></span>Con acceso al centro</span>'
     f'<span><span style="display:inline-block;width:14px;height:14px;background:{PERIF_COLOR};'
@@ -539,7 +557,7 @@ if bar_id is not None:
                 "Línea": r["linea"],
                 "Ramal": r.get("recorrido"),
                 "Sentido": r.get("sentido"),
-                "Km": float(r.get("longitud_m") or 0.0) / 1000.0,
+                "Km de variante": float(r.get("longitud_m") or 0.0) / 1000.0,
                 "Llega al centro": "Sí" if bool(r.get("acceso_centro")) else "No",
             }
         )
@@ -553,7 +571,7 @@ if bar_id is not None:
                     "Línea": r.get("label"),
                     "Ramal": None,
                     "Sentido": None,
-                    "Km": _route_length_m(r["coords"]) / 1000.0,
+                    "Km de variante": _route_length_m(r["coords"]) / 1000.0,
                     "Llega al centro": "Sí" if subte_center_flags[pos] else "No",
                 }
             )
@@ -567,18 +585,23 @@ if bar_id is not None:
                     "Línea": r.get("linea"),
                     "Ramal": r.get("descrip"),
                     "Sentido": None,
-                    "Km": _route_length_m(r["coords"]) / 1000.0,
+                    "Km de variante": _route_length_m(r["coords"]) / 1000.0,
                     "Llega al centro": "Sí" if ffcc_center_flags[pos] else "No",
                 }
             )
     if det_rows:
         det = pd.DataFrame(det_rows).sort_values(
-            ["Llega al centro", "Km"], ascending=[False, False]
+            ["Llega al centro", "Km de variante"], ascending=[False, False]
         )
         with st.expander(f"Líneas cercanas a {barrio_sel} y acceso al centro"):
-            st.dataframe(det, width="stretch", hide_index=True)
+            st.dataframe(
+                det,
+                width="stretch",
+                hide_index=True,
+                column_config={"Km de variante": st.column_config.NumberColumn(format="%.2f")},
+            )
             st.caption(
-                "Km = longitud del recorrido/variante; el acceso directo no considera transbordos. "
+                "Km de variante = longitud del recorrido/variante; el acceso directo no considera transbordos. "
                 f"Colectivo a ≤ {BARRIO_BUS_RADIUS_M} m; subte y ferrocarril a ≤ {BARRIO_RAIL_RADIUS_M} m."
             )
 

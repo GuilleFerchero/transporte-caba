@@ -46,6 +46,7 @@ streamlit run app_subte.py        # viajes por molinete (SBASE)
 - `longitud_m` debe seguir `float`; `_read_parquet_bundle` convierte geometrías a listas Python (`_deep_python`).
 - Feriados: `FERIADOS_ARG` estático 2024-2027; actualizarlo al publicarse un año nuevo.
 - Mapas: Esri dark/light + OSM.de (CARTO/OSM.org se cuelgan); `st_folium(..., returned_objects=[])` salvo en `app_acceso` (clic de barrio).
+- Tipografía: `THEME_CSS` importa Inter desde Google Fonts y aplica `font-family` global con `!important` a las 3 apps; `.streamlit/config.toml` sigue en `font = "sans serif"`. Números con `tabular-nums` en KPIs, leyendas y tablas.
 - Las apps deciden si hay SUBE con `sube_available()` (contempla `data_bundle/`), nunca con `os.path.exists` sobre `data/`. `bundle_available()` exige `schema_version` y que existan todos los archivos del bundle.
 
 ## Trampas conocidas
