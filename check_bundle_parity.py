@@ -10,8 +10,8 @@ Sale con código 1 si algo no cuadra, así sirve como paso de CI o pre-commit.
 Hace dos cosas:
 
 A) Invariantes que no necesitan los datos crudos (baratos y detectan los bugs
-   más caros): el filtro de grafías SUBE, el dtype de `fecha` del bundle y la
-   completitud de `_grid_matches`.
+   más caros): el filtro de grafías SUBE, el dtype de `fecha` del bundle, la
+   completitud de `_grid_matches` y el perfil de acceso directo al centro.
 B) Paridad bundle <-> crudo: reconstruye las tablas geográficas desde `data/`
    con los MISMOS builders de `data_loaders` y las compara contra los parquet.
    Los agregados (SUBE, molinetes) no se reconstruyen: se comparan contra los
@@ -136,6 +136,53 @@ def test_grid_matches() -> None:
     _, q_bug = dl._grid_matches(grid, meta, lat, lon, ren["lat"], ren["lon"], dl.RENABAP_RADIUS_M)
     cubierta = ren["id"][q_bug].nunique()
     check("cobertura RE-NABAP > 500 barrios a 300 m", cubierta > 500, f"{cubierta} barrios")
+
+
+def test_acceso_centro() -> None:
+    section("A5. Acceso directo al centro (comunas 1+3)")
+    areas = dl._center_areas(dl.CENTER_COMUNA_IDS)
+    check("_center_areas devuelve las comunas del centro", len(areas) >= 2,
+          f"{len(areas)} polígonos")
+
+    token = dl.access_profile_token()
+    bus_flags, subte_flags, ffcc_flags = dl.route_center_flags(token, dl.CENTER_COMUNA_IDS)
+    check("colectivos: algunos llegan al centro y otros no",
+          any(bus_flags) and not all(bus_flags), f"{sum(bus_flags)}/{len(bus_flags)}")
+    check("subte y ferrocarril: hay líneas al centro",
+          any(subte_flags) and any(ffcc_flags),
+          f"subte={sum(subte_flags)}/{len(subte_flags)} ffcc={sum(ffcc_flags)}/{len(ffcc_flags)}")
+
+    profile = dl.barrio_access_profile(dl.RENABAP_RADIUS_M, dl.CENTER_COMUNA_IDS, token)
+    centroids = dl.load_renabap_centroids()
+    check("perfil: una fila por barrio RE-NABAP", len(profile) == len(centroids),
+          f"{len(profile)} vs {len(centroids)}")
+    flag_cols = [
+        "bus_near", "bus_center", "subte_near", "subte_center",
+        "ffcc_near", "ffcc_center",
+    ]
+    check("perfil: flags booleanos",
+          all(pd.api.types.is_bool_dtype(profile[c]) for c in flag_cols))
+    check("perfil: km_center <= km_total",
+          bool((profile["km_center"] <= profile["km_total"] + 1e-6).all()))
+    check("perfil: share_center en [0, 1]", bool(profile["share_center"].between(0, 1).all()))
+
+    cubiertos = set(dl.renabap_covered_ids(True, True))
+    nuevos = set(
+        profile.loc[
+            profile["bus_near"] | profile["subte_near"] | profile["ffcc_near"], "id"
+        ]
+    )
+    check("perfil: cobertura coincide con renabap_covered_ids", nuevos == cubiertos,
+          f"{len(nuevos)} vs {len(cubiertos)}")
+    centro = set(
+        profile.loc[
+            profile["bus_center"] | profile["subte_center"] | profile["ffcc_center"], "id"
+        ]
+    )
+    perif = nuevos - centro
+    check("perfil: centro ⊆ cobertura y hay periféricos",
+          centro <= cubiertos and bool(centro) and bool(perif),
+          f"centro={len(centro)} perif={len(perif)}")
 
 
 # ---------------------------------------------------------------------------
@@ -285,6 +332,7 @@ def main() -> int:
     test_lineas_amba_con_demanda()
     test_sube_daily_dtype()
     test_grid_matches()
+    test_acceso_centro()
     test_paridad()
 
     print()

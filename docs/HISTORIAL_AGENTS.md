@@ -532,6 +532,12 @@ streamlit run app_subte.py        # Viajes del Subte por molinete (SBASE)
   ```
 - Verificar sintaxis:
   `python -m py_compile data_loaders.py app_transporte.py app_acceso.py app_subte.py build_data_bundle.py check_bundle_parity.py`
+- `check_bundle_parity.py` tiene una sección **A5** para el acceso al centro:
+  valida `_center_areas`, los flags de `route_center_flags` y que
+  `barrio_access_profile` tenga una fila por barrio, flags booleanos,
+  `km_center <= km_total`, `share_center ∈ [0, 1]` y cobertura idéntica a
+  `renabap_covered_ids`. El `share_center` se acota con `np.clip` porque la suma
+  de un subconjunto de km podía dar `1.0000000000000002` por punto flotante.
 - **Verificar el bundle**: `venv\Scripts\python check_bundle_parity.py` (sale
   con código 1 si algo no cuadra, así sirve como paso de CI). Hace dos cosas:
   (A) invariantes baratos que cazan los bugs caros — las grafías que acepta/
@@ -592,14 +598,16 @@ streamlit run app_subte.py        # Viajes del Subte por molinete (SBASE)
   `_ingest_molinete_zip` lo baje de la CDN) y regenerar el agregado; la app
   muestra el año más cargado de base (por ahora 2025) y marca como "parcial" los
   años incompletos. El ZIP de 2026 es parcial (enero–junio).
-- **Acceso desde barrios populares (`app_acceso.py`)**: la grilla
-  `_grid_matches` ya cubre todo el AMBA en ~1 s; ideas a futuro: corredores
-  hacia destinos clave (microcentro, intercambiadores, estaciones terminales),
-  distancia a la estación más cercana por modo, y exportación por barrio (CSV
-  con distancia mínima por red) para organizaciones sociales.
-- Corregir el texto de metodología de `app_acceso.py` que aún dice "~1.274
-  recorridos AMBA" (hoy son 2.199) y el caption de `app_subte.py` que menciona
-  CARTO (el basemap real es Esri/OSM.de).
+- **Acceso desde barrios populares (`app_acceso.py`)**: implementado el acceso
+  directo al centro (comunas 1+3) con 3 estados (con acceso / solo periférico /
+  sin cobertura) y métricas `km_center`/`share_center` (intensidad, no
+  frecuencia); se calcula en runtime con `barrio_access_profile`, sin tocar el
+  bundle. Con los datos actuales: 956 barrios con cobertura, 435 con acceso
+  directo, 521 solo periféricos (169.212 familias) y 400 sin cobertura. Ideas a
+  futuro: transbordos, frecuencias, tiempos de viaje, estaciones terminales y
+  exportación por barrio.
+- Corregir el caption de `app_subte.py` que menciona CARTO (el basemap real es
+  Esri/OSM.de).
 
 ## Deploy
 

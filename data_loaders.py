@@ -198,6 +198,8 @@ RENABAP_AMBA_DEPTS = {
 
 RENABAP_COLOR = "#d62728"
 RENABAP_RADIUS_M = 300
+CENTER_COMUNA_IDS = (1, 3)
+CENTER_LABEL = "Centro (comunas 1 y 3)"
 
 # Feriados nacionales argentinos (inamovibles, trasladables y puentes), fuente
 # oficial DDJJ (https://api.argentinadatos.com/v1/feriados/). Se actualizan a mano
@@ -2058,6 +2060,220 @@ def load_comunas() -> dict:
         except Exception:
             pass
     return load_geojson(COMUNAS_FILE, COMUNAS_URL)
+
+
+# ---------------------------------------------------------------------------
+# Acceso directo al centro (comunas 1+3)
+# ---------------------------------------------------------------------------
+def access_profile_token() -> str:
+    """Token de caché para el perfil de acceso (redes + centro)."""
+    return _data_token(ROUTES_SOURCE_FILES + [SUBTE_LINEAS_FILE, FFCC_LINEAS_FILE])
+
+
+@st.cache_data(show_spinner=False)
+def _center_areas(center_comunas=CENTER_COMUNA_IDS) -> tuple:
+    """Devuelve (bbox, geometría) de las comunas que cuentan como centro."""
+    fc = load_comunas()
+    areas = []
+    for feature in fc.get("features", []):
+        props = feature.get("properties") or {}
+        raw = props.get("comuna")
+        if raw is None:
+            raw = props.get("COMUNA")
+        try:
+            comuna = int(float(raw))
+        except (TypeError, ValueError):
+            continue
+        if comuna not in center_comunas:
+            continue
+        geom = feature.get("geometry") or {}
+        if geom.get("type") == "Polygon":
+            polys = [geom.get("coordinates", [])]
+        elif geom.get("type") == "MultiPolygon":
+            polys = geom.get("coordinates", [])
+        else:
+            continue
+        for poly in polys:
+            if not poly:
+                continue
+            ring = poly[0]
+            if len(ring) < 3:
+                continue
+            xs = [float(p[0]) for p in ring]
+            ys = [float(p[1]) for p in ring]
+            areas.append(
+                (
+                    min(xs), min(ys), max(xs), max(ys),
+                    {"type": "Polygon", "coordinates": [ring]},
+                )
+            )
+    return tuple(areas)
+
+
+def _point_in_areas(lat: float, lon: float, areas) -> bool:
+    for minx, miny, maxx, maxy, geom in areas:
+        if minx <= lon <= maxx and miny <= lat <= maxy and point_in_polygon(lat, lon, geom):
+            return True
+    return False
+
+
+def _rows_center_flags(df: pd.DataFrame, areas) -> tuple:
+    """Marca, por fila, si algún vértice del recorrido cae dentro del centro."""
+    flags = []
+    for row in df.itertuples():
+        coords = getattr(row, "coords", None)
+        hit = False
+        if coords:
+            for seg in coords:
+                if not seg:
+                    continue
+                for c in seg:
+                    if _point_in_areas(float(c[1]), float(c[0]), areas):
+                        hit = True
+                        break
+                if hit:
+                    break
+        flags.append(hit)
+    return tuple(flags)
+
+
+@st.cache_data(show_spinner=False)
+def route_center_flags(token: str, center_comunas=CENTER_COMUNA_IDS) -> tuple:
+    """Flags por fila (colectivo, subte, ffcc): el recorrido entra al centro."""
+    _ = token
+    areas = _center_areas(center_comunas)
+    return (
+        _rows_center_flags(load_routes_df(), areas),
+        _rows_center_flags(load_subte_lines(), areas),
+        _rows_center_flags(load_ffcc_lines(), areas),
+    )
+
+
+def _near_owners_by_barrio(grid, meta, net_lat, net_lon, owner, qlat, qlon, qids, radius_m) -> dict:
+    """Para cada barrio, índices de la red a <= radius_m de alguno de sus vértices."""
+    lat_m, lon_m, cell_m = meta
+    qlat = np.asarray(qlat, dtype=float)
+    qlon = np.asarray(qlon, dtype=float)
+    qids = np.asarray(qids)
+    hits = {}
+    if qlat.size == 0 or not grid:
+        return hits
+    steps = int(np.ceil(radius_m / cell_m)) + 1
+    for k in range(qlat.size):
+        gk_lat = int(qlat[k] * lat_m / cell_m)
+        gk_lon = int(qlon[k] * lon_m / cell_m)
+        found = set()
+        for di in range(-steps, steps + 1):
+            for dj in range(-steps, steps + 1):
+                bucket = grid.get((gk_lat + di, gk_lon + dj))
+                if not bucket:
+                    continue
+                idx = np.asarray(bucket)
+                d = _haversine_np(qlat[k], qlon[k], net_lat[idx], net_lon[idx])
+                m = d <= radius_m
+                if m.any():
+                    found.update(int(o) for o in owner[idx[m]])
+        if found:
+            hits.setdefault(int(qids[k]), set()).update(found)
+    return hits
+
+
+@st.cache_data(show_spinner=False)
+def barrio_access_profile(
+    radius_m: int = RENABAP_RADIUS_M,
+    center_comunas=CENTER_COMUNA_IDS,
+    token: str = "",
+) -> pd.DataFrame:
+    """Perfil por barrio: proximidad por modo y acceso directo al centro.
+
+    Devuelve una fila por barrio RE-NABAP con flags por red (`bus_near`,
+    `subte_near`, `ffcc_near` y sus equivalentes `*_center`) y métricas de
+    intensidad (`km_total`, `km_center`, `share_center`, `max_km`).
+    """
+    centroids = load_renabap_centroids().copy()
+    centroids["id"] = pd.to_numeric(centroids["id"], errors="coerce")
+    centroids = centroids.dropna(subset=["id"])
+    centroids["id"] = centroids["id"].astype(int)
+    base = centroids[["id"]].drop_duplicates().reset_index(drop=True)
+
+    ren = load_renabap_points().copy()
+    ren["id"] = pd.to_numeric(ren["id"], errors="coerce")
+    ren = ren.dropna(subset=["id"])
+    ren["id"] = ren["id"].astype(int)
+
+    if ren.empty or base.empty:
+        for col in (
+            "bus_near", "bus_center", "subte_near", "subte_center",
+            "ffcc_near", "ffcc_center",
+        ):
+            base[col] = False
+        for col in (
+            "km_total", "km_center", "share_center", "max_km",
+            "km_bus_total", "km_bus_center", "km_subte_total",
+            "km_subte_center", "km_ffcc_total", "km_ffcc_center",
+            "max_km_bus", "max_km_subte", "max_km_ffcc",
+        ):
+            base[col] = 0.0
+        return base
+
+    bus_flags, subte_flags, ffcc_flags = route_center_flags(token, center_comunas)
+    bus_df = load_routes_df()
+    subte_df = load_subte_lines()
+    ffcc_df = load_ffcc_lines()
+
+    bus_lengths = (
+        bus_df["longitud_m"].to_numpy(dtype=float)
+        if "longitud_m" in bus_df
+        else np.zeros(len(bus_df), dtype=float)
+    )
+    subte_lengths = np.asarray([_route_length_m(c) for c in subte_df["coords"]], dtype=float)
+    ffcc_lengths = np.asarray([_route_length_m(c) for c in ffcc_df["coords"]], dtype=float)
+
+    modes = (
+        ("bus", bus_network(_data_token(ROUTES_SOURCE_FILES)), bus_flags, bus_lengths),
+        ("subte", subte_network(_data_token([SUBTE_LINEAS_FILE])), subte_flags, subte_lengths),
+        ("ffcc", ffcc_network(_data_token([FFCC_LINEAS_FILE])), ffcc_flags, ffcc_lengths),
+    )
+
+    for mode, (net_lat, net_lon, owner), flags, lengths in modes:
+        if net_lat.size == 0:
+            base[f"{mode}_near"] = False
+            base[f"{mode}_center"] = False
+            base[f"km_{mode}_total"] = 0.0
+            base[f"km_{mode}_center"] = 0.0
+            base[f"max_km_{mode}"] = 0.0
+            continue
+        grid, meta = build_point_grid(net_lat, net_lon, cell_m=radius_m)
+        hits = _near_owners_by_barrio(
+            grid, meta, net_lat, net_lon, owner,
+            ren["lat"], ren["lon"], ren["id"], radius_m,
+        )
+        center_owners = {i for i, flag in enumerate(flags) if flag}
+        lengths_km = lengths / 1000.0
+        near_ids, center_ids = set(), set()
+        km_total, km_center, max_km = {}, {}, {}
+        for bar_id, owners in hits.items():
+            if not owners:
+                continue
+            near_ids.add(bar_id)
+            km_total[bar_id] = float(sum(lengths_km[o] for o in owners))
+            max_km[bar_id] = float(max(lengths_km[o] for o in owners))
+            center = owners & center_owners
+            if center:
+                center_ids.add(bar_id)
+                km_center[bar_id] = float(sum(lengths_km[o] for o in center))
+        base[f"{mode}_near"] = base["id"].isin(near_ids)
+        base[f"{mode}_center"] = base["id"].isin(center_ids)
+        base[f"km_{mode}_total"] = base["id"].map(km_total).fillna(0.0)
+        base[f"km_{mode}_center"] = base["id"].map(km_center).fillna(0.0)
+        base[f"max_km_{mode}"] = base["id"].map(max_km).fillna(0.0)
+
+    base["km_total"] = base["km_bus_total"] + base["km_subte_total"] + base["km_ffcc_total"]
+    base["km_center"] = base["km_bus_center"] + base["km_subte_center"] + base["km_ffcc_center"]
+    base["max_km"] = base[["max_km_bus", "max_km_subte", "max_km_ffcc"]].max(axis=1)
+    share = np.where(base["km_total"] > 0, base["km_center"] / base["km_total"], 0.0)
+    base["share_center"] = np.clip(share, 0.0, 1.0)
+    return base
 
 
 @st.cache_data(show_spinner=False)

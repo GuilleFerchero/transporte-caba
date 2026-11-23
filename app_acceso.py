@@ -21,7 +21,10 @@ from data_loaders import (
     _load_renabap_geojson,
     _subte_line_color,
     point_in_polygon,
-    renabap_covered_ids,
+    barrio_access_profile,
+    route_center_flags,
+    access_profile_token,
+    _route_length_m,
     lines_near_barrio,
     _sube_source_token,
     load_sube_transactions,
@@ -34,6 +37,8 @@ from data_loaders import (
     THEME_CSS,
     AMBA_BUS_BOUNDS,
     RENABAP_RADIUS_M,
+    CENTER_COMUNA_IDS,
+    CENTER_LABEL,
     JUR_COLOR,
     FFCC_COLOR,
     LINE_COLORS,
@@ -45,7 +50,8 @@ from data_loaders import (
     _fmt_dec,
 )
 
-COBERTO_COLOR = "#2e9e4b"
+CENTER_COLOR = "#2e9e4b"
+PERIF_COLOR = "#e0a400"
 NO_COBERTO_COLOR = "#d62728"
 BARRIO_BUS_RADIUS_M = 500
 BARRIO_RAIL_RADIUS_M = 1200
@@ -66,11 +72,12 @@ st.markdown(
     app_header_html(
         "Buenos Aires Data · Secretaría de Transporte",
         "Acceso a la Ciudad desde Barrios Populares",
-        "Cobertura de colectivo, subte y ferrocarril sobre los barrios RE-NABAP del AMBA",
+        "Cobertura de colectivo, subte y ferrocarril y acceso directo al centro en los barrios RE-NABAP del AMBA",
         chips=[
             f"Barrios RE-NABAP <b>{_fmt(len(ren_centroids_full))}</b>",
             f"Red de colectivo <b>{_fmt(len(routes_df))} recorridos</b>",
             f"Umbral de cercanía <b>{_fmt_dec(RENABAP_RADIUS_M)} m</b>",
+            f"Acceso directo <b>{CENTER_LABEL}</b>",
         ],
     ),
     unsafe_allow_html=True,
@@ -105,14 +112,24 @@ def _find_barrio_at(lat, lon, fc) -> int | None:
 
 
 @st.cache_data(show_spinner=False)
-def _renabap_fc_with_estado(covered: frozenset):
+def _renabap_fc_with_estado(centro_ids: frozenset, perif_ids: frozenset):
     fc = _load_renabap_geojson()
     if fc is None:
         return None
     out = copy.deepcopy(fc)
     for feature in out["features"]:
         eid = feature["properties"].get("id_renabap")
-        feature["properties"]["estado"] = "con cobertura" if eid in covered else "sin cobertura"
+        try:
+            eid = int(eid)
+        except (TypeError, ValueError):
+            eid = None
+        if eid in centro_ids:
+            estado = "con acceso al centro"
+        elif eid in perif_ids:
+            estado = "solo periférico"
+        else:
+            estado = "sin cobertura"
+        feature["properties"]["estado"] = estado
     return out
 
 
@@ -128,6 +145,7 @@ with st.sidebar:
     st.markdown("### Redes consideradas")
     st.caption(
         "La cobertura siempre considera todas las líneas de colectivo del AMBA. "
+        "El acceso directo al centro se evalúa con las redes tildadas. "
         "En el mapa, el colectivo está oculto por defecto para no saturarlo; "
         "se muestra solo para el barrio seleccionado o tildando esta opción:"
     )
@@ -141,6 +159,15 @@ with st.sidebar:
         key=lambda p: (len(str(p)), str(p)),
     )
     partido_filter = st.selectbox("Partido / Comuna", partidos)
+
+    estado_filter = st.selectbox(
+        "Estado de acceso",
+        ["Todos", "Con acceso al centro", "Solo periférico", "Sin cobertura"],
+        help=(
+            "Con acceso al centro: cerca de la red y con al menos una línea directa "
+            f"a {CENTER_LABEL}. Solo periférico: cerca de la red, pero sin línea directa."
+        ),
+    )
 
     barrio_labels = {}
     barrio_label_of_id = {}
@@ -175,60 +202,98 @@ with st.sidebar:
         help="Elegí un barrio de la lista o hacé clic sobre un polígono en el mapa: se muestran las líneas de transporte que pasan cerca.",
     )
 
-with st.spinner("Midiendo cobertura de la red..."):
-    covered = renabap_covered_ids(show_subte, show_ffcc)
-    ren_centroids = load_renabap_centroids().copy()
+profile_token = access_profile_token()
+with st.spinner("Midiendo cobertura y acceso al centro..."):
+    profile = barrio_access_profile(RENABAP_RADIUS_M, CENTER_COMUNA_IDS, profile_token)
+    bus_center_flags, subte_center_flags, ffcc_center_flags = route_center_flags(
+        profile_token, CENTER_COMUNA_IDS
+    )
+    ren_full = load_renabap_centroids().copy()
 
-ren_centroids["cobertura"] = ren_centroids["id"].astype(int).isin(covered)
-ren_centroids["personas"] = ren_centroids["familias"] * 4
+ren_full["id"] = pd.to_numeric(ren_full["id"], errors="coerce")
+ren_full = ren_full.dropna(subset=["id"])
+ren_full["id"] = ren_full["id"].astype(int)
+ren_full = ren_full.merge(profile, on="id", how="left")
+for col in ("bus_near", "bus_center", "subte_near", "subte_center", "ffcc_near", "ffcc_center"):
+    ren_full[col] = ren_full[col].fillna(False).astype(bool)
+for col in (
+    "km_total", "km_center", "share_center", "max_km",
+    "km_bus_total", "km_bus_center", "km_subte_total", "km_subte_center",
+    "km_ffcc_total", "km_ffcc_center", "max_km_bus", "max_km_subte", "max_km_ffcc",
+):
+    ren_full[col] = ren_full[col].fillna(0.0)
 
+ren_full["cobertura"] = (
+    ren_full["bus_near"]
+    | (show_subte & ren_full["subte_near"])
+    | (show_ffcc & ren_full["ffcc_near"])
+)
+ren_full["acceso_centro"] = (
+    ren_full["bus_center"]
+    | (show_subte & ren_full["subte_center"])
+    | (show_ffcc & ren_full["ffcc_center"])
+)
+ren_full["periferico"] = ren_full["cobertura"] & ~ren_full["acceso_centro"]
+ren_full["sin_cobertura"] = ~ren_full["cobertura"]
+ren_full["personas"] = ren_full["familias"] * 4
+
+ren_centroids = ren_full.copy()
 if partido_filter != "Todos":
     ren_centroids = ren_centroids[ren_centroids["partido"] == partido_filter].reset_index(drop=True)
+if estado_filter != "Todos":
+    estado_col = {
+        "Con acceso al centro": "acceso_centro",
+        "Solo periférico": "periferico",
+        "Sin cobertura": "sin_cobertura",
+    }[estado_filter]
+    ren_centroids = ren_centroids[ren_centroids[estado_col]].reset_index(drop=True)
 
 if ren_centroids.empty:
     st.warning("No hay barrios populares para el filtro seleccionado.")
     st.stop()
 
 total_barrios = len(ren_centroids)
-con_cobertura = int(ren_centroids["cobertura"].sum())
-sin_cobertura = total_barrios - con_cobertura
-familias_cubiertas = int(ren_centroids.loc[ren_centroids["cobertura"], "familias"].sum())
-pct = 100.0 * con_cobertura / total_barrios if total_barrios else 0.0
+con_centro = int(ren_centroids["acceso_centro"].sum())
+solo_perif = int(ren_centroids["periferico"].sum())
+sin_cob = int(ren_centroids["sin_cobertura"].sum())
+fam_centro = int(ren_centroids.loc[ren_centroids["acceso_centro"], "familias"].sum())
+fam_perif = int(ren_centroids.loc[ren_centroids["periferico"], "familias"].sum())
+pct_centro = 100.0 * con_centro / total_barrios if total_barrios else 0.0
 
 k1, k2, k3, k4 = st.columns(4)
 with k1:
     st.markdown(
         _metric_box_html(
-            "Barrios con cobertura",
-            f"{_fmt(con_cobertura)}<small>/ {_fmt(total_barrios)}</small>",
-            f'<span>a ≤ {RENABAP_RADIUS_M} m de alguna red</span>',
+            "Barrios con acceso al centro",
+            f"{_fmt(con_centro)}<small>/ {_fmt(total_barrios)}</small>",
+            f'<span>a ≤ {RENABAP_RADIUS_M} m y línea directa a {CENTER_LABEL}</span>',
         ),
         unsafe_allow_html=True,
     )
 with k2:
     st.markdown(
         _metric_box_html(
-            "Barrios sin cobertura",
-            f'<span style="color:{NO_COBERTO_COLOR};">{_fmt(sin_cobertura)}</span>',
-            '<span>lejos de toda la red considerada</span>',
+            "Solo cobertura periférica",
+            f'<span style="color:{PERIF_COLOR};">{_fmt(solo_perif)}</span>',
+            f'<span>{_fmt(fam_perif)} fam. · cerca de la red, sin línea directa al centro</span>',
         ),
         unsafe_allow_html=True,
     )
 with k3:
     st.markdown(
         _metric_box_html(
-            "Familias con cobertura",
-            f"{_fmt(familias_cubiertas)}<small>fam.</small>",
-            f'<span>~ {_fmt(familias_cubiertas * 4)} personas (×4)</span>',
+            "Barrios sin cobertura",
+            f'<span style="color:{NO_COBERTO_COLOR};">{_fmt(sin_cob)}</span>',
+            '<span>lejos de toda la red considerada</span>',
         ),
         unsafe_allow_html=True,
     )
 with k4:
     st.markdown(
         _metric_box_html(
-            "% de barrios RE-NABAP cubiertos",
-            f"{_fmt_dec(pct)}<small>%</small>",
-            '<span>sin ponderar por familias</span>',
+            "Familias con acceso al centro",
+            f"{_fmt(fam_centro)}<small>fam.</small>",
+            f'<span>~ {_fmt(fam_centro * 4)} personas (×4) · {_fmt_dec(pct_centro)}% de los barrios</span>',
         ),
         unsafe_allow_html=True,
     )
@@ -242,9 +307,11 @@ if show_ffcc:
 if suffix:
     red_label += " + " + " y ".join(suffix)
 st.caption(
-    f"Se considera con cobertura un barrio popular cuando la <b>frontera</b> de su polígono cae a "
-    f"≤ {RENABAP_RADIUS_M} m de al menos una línea de {red_label}. "
-    f"El conteo usa los vértices del polígono (barrios alargados bordean la red aunque su centroide quede lejos).",
+    f"Un barrio cuenta como <b>con acceso al centro</b> cuando la <b>frontera</b> de su polígono cae a "
+    f"≤ {RENABAP_RADIUS_M} m de al menos una línea de {red_label} que entra en <b>{CENTER_LABEL}</b>. "
+    f"Si está cerca de la red pero ninguna de esas líneas llega al centro, queda como <b>solo periférico</b>. "
+    f"El acceso directo no considera transbordos. El conteo usa los vértices del polígono "
+    f"(barrios alargados bordean la red aunque su centroide quede lejos).",
     unsafe_allow_html=True,
 )
 
@@ -262,12 +329,25 @@ if barrio_sel != "Todos":
 elif show_bus:
     bus_routes = routes_df
 
-renabap_fc = _renabap_fc_with_estado(frozenset(covered))
+bus_center_series = pd.Series(bus_center_flags, index=routes_df.index, name="acceso_centro")
+bus_routes = bus_routes.join(bus_center_series)
+
+centro_ids = frozenset(ren_full.loc[ren_full["acceso_centro"], "id"].astype(int))
+perif_ids = frozenset(ren_full.loc[ren_full["periferico"], "id"].astype(int))
+renabap_fc = _renabap_fc_with_estado(centro_ids, perif_ids)
 if renabap_fc is not None:
     def style_fn(feature):
-        is_covered = feature["properties"].get("estado") == "con cobertura"
-        color = COBERTO_COLOR if is_covered else NO_COBERTO_COLOR
-        selected = bar_id is not None and feature["properties"].get("id_renabap") == bar_id
+        estado = feature["properties"].get("estado")
+        if estado == "con acceso al centro":
+            color = CENTER_COLOR
+        elif estado == "solo periférico":
+            color = PERIF_COLOR
+        else:
+            color = NO_COBERTO_COLOR
+        selected = (
+            bar_id is not None
+            and str(feature["properties"].get("id_renabap")) == str(bar_id)
+        )
         return {
             "fillColor": color,
             "color": "#ffffff" if selected else color,
@@ -380,8 +460,10 @@ st.caption(
 
 st.markdown(
     f'<div style="display:flex;gap:24px;margin:8px 0;color:#aeb8cc;font-size:14px;">'
-    f'<span><span style="display:inline-block;width:14px;height:14px;background:{COBERTO_COLOR};'
-    f'border-radius:2px;margin-right:6px;"></span>Con cobertura</span>'
+    f'<span><span style="display:inline-block;width:14px;height:14px;background:{CENTER_COLOR};'
+    f'border-radius:2px;margin-right:6px;"></span>Con acceso al centro</span>'
+    f'<span><span style="display:inline-block;width:14px;height:14px;background:{PERIF_COLOR};'
+    f'border-radius:2px;margin-right:6px;"></span>Solo periférico</span>'
     f'<span><span style="display:inline-block;width:14px;height:14px;background:{NO_COBERTO_COLOR};'
     f'border-radius:2px;margin-right:6px;"></span>Sin cobertura</span></div>',
     unsafe_allow_html=True,
@@ -429,22 +511,95 @@ if bar_id is not None:
         else:
             st.info("No hay datos SUBE para las líneas que pasan cerca del barrio seleccionado.")
 
+if bar_id is not None:
+    prof = ren_full.loc[ren_full["id"] == bar_id].iloc[0]
+    km_centro_visible = float(prof["km_bus_center"])
+    km_total_visible = float(prof["km_bus_total"])
+    if show_subte:
+        km_centro_visible += float(prof["km_subte_center"])
+        km_total_visible += float(prof["km_subte_total"])
+    if show_ffcc:
+        km_centro_visible += float(prof["km_ffcc_center"])
+        km_total_visible += float(prof["km_ffcc_total"])
+    share_visible = 100.0 * km_centro_visible / km_total_visible if km_total_visible else 0.0
+    st.markdown(
+        _metric_box_html(
+            f"Km de líneas cercanas que llegan a {CENTER_LABEL}",
+            f"{_fmt_dec(km_centro_visible)}<small>km</small>",
+            f"<span>{_fmt_dec(share_visible)}% del km cercano (≤{RENABAP_RADIUS_M} m) · no pondera frecuencia</span>",
+        ),
+        unsafe_allow_html=True,
+    )
+
+    det_rows = []
+    for _, r in bus_routes.iterrows():
+        det_rows.append(
+            {
+                "Modo": "Colectivo",
+                "Línea": r["linea"],
+                "Ramal": r.get("recorrido"),
+                "Sentido": r.get("sentido"),
+                "Km": float(r.get("longitud_m") or 0.0) / 1000.0,
+                "Llega al centro": "Sí" if bool(r.get("acceso_centro")) else "No",
+            }
+        )
+    if show_subte and near_subte_idx:
+        subte_df = load_subte_lines()
+        for pos in sorted(near_subte_idx):
+            r = subte_df.iloc[pos]
+            det_rows.append(
+                {
+                    "Modo": "Subte",
+                    "Línea": r.get("label"),
+                    "Ramal": None,
+                    "Sentido": None,
+                    "Km": _route_length_m(r["coords"]) / 1000.0,
+                    "Llega al centro": "Sí" if subte_center_flags[pos] else "No",
+                }
+            )
+    if show_ffcc and near_ffcc_idx:
+        ffcc_df = load_ffcc_lines()
+        for pos in sorted(near_ffcc_idx):
+            r = ffcc_df.iloc[pos]
+            det_rows.append(
+                {
+                    "Modo": "Ferrocarril",
+                    "Línea": r.get("linea"),
+                    "Ramal": r.get("descrip"),
+                    "Sentido": None,
+                    "Km": _route_length_m(r["coords"]) / 1000.0,
+                    "Llega al centro": "Sí" if ffcc_center_flags[pos] else "No",
+                }
+            )
+    if det_rows:
+        det = pd.DataFrame(det_rows).sort_values(
+            ["Llega al centro", "Km"], ascending=[False, False]
+        )
+        with st.expander(f"Líneas cercanas a {barrio_sel} y acceso al centro"):
+            st.dataframe(det, width="stretch", hide_index=True)
+            st.caption(
+                "Km = longitud del recorrido/variante; el acceso directo no considera transbordos. "
+                f"Colectivo a ≤ {BARRIO_BUS_RADIUS_M} m; subte y ferrocarril a ≤ {BARRIO_RAIL_RADIUS_M} m."
+            )
+
 st.subheader("Resumen por partido / comuna")
 resumen = (
     ren_centroids.groupby("partido", as_index=False)
     .agg(
         barrios=("id", "count"),
-        con_cobertura=("cobertura", "sum"),
+        con_centro=("acceso_centro", "sum"),
+        solo_perif=("periferico", "sum"),
+        sin_cob=("sin_cobertura", "sum"),
         familias=("familias", "sum"),
-        familias_cubiertas=("familias", lambda s: s[ren_centroids.loc[s.index, "cobertura"]].sum()),
+        fam_centro=("familias", lambda s: s[ren_centroids.loc[s.index, "acceso_centro"]].sum()),
     )
-    .sort_values("con_cobertura", ascending=True)
-    .reset_index(drop=True)
 )
-resumen["sin_cobertura"] = resumen["barrios"] - resumen["con_cobertura"]
-resumen["personas_cubiertas"] = resumen["familias_cubiertas"] * 4
-resumen.columns = ["Partido / Comuna", "Barrios", "Con cobertura", "Familias", "Fam. cubiertas", "Sin cobertura", "Personas cubiertas"]
-resumen = resumen[["Partido / Comuna", "Barrios", "Con cobertura", "Sin cobertura", "Familias", "Fam. cubiertas", "Personas cubiertas"]]
+resumen["pct_centro"] = 100.0 * resumen["con_centro"] / resumen["barrios"]
+resumen = resumen.sort_values("pct_centro", ascending=True).reset_index(drop=True)
+resumen.columns = [
+    "Partido / Comuna", "Barrios", "Con acceso al centro", "Solo periférico",
+    "Sin cobertura", "Familias", "Fam. con acceso al centro", "% con acceso al centro",
+]
 
 st.dataframe(resumen, width="stretch", hide_index=True)
 
@@ -452,7 +607,7 @@ csv = resumen.to_csv(index=False).encode("utf-8-sig")
 st.download_button(
     "Descargar resumen (CSV)",
     data=csv,
-    file_name="cobertura_renabap_amba.csv",
+    file_name="acceso_centro_renabap_amba.csv",
     mime="text/csv",
 )
 
@@ -467,21 +622,25 @@ with st.expander("Sobre los datos y la metodología"):
         "Demanda: transacciones SUBE por línea (Secretaría de Transporte)."
     )
     st.markdown(
-        "**Metodología:** se considera que un barrio popular tiene *cobertura* cuando algún **vértice de la "
-        "frontera** de su polígono queda a ≤ 300 m de al menos una línea activa (colectivo del AMBA completo, "
-        "y opcionalmente subte y/o ferrocarril). Se usan los vértices y no el centroide para no perder barrios "
-        "alargados (p.ej. Villa Itatí) que bordean una ruta aunque su centroide quede lejos. Las *personas* son una "
-        "estimación gruesa: familias × 4 (excluye otras tipologías). El conteo de las líneas de colectivo usa la "
-        f"geometría completa de los {_fmt(len(routes_df))} recorridos AMBA. "
+        "**Metodología:** un barrio popular tiene *cobertura* cuando algún **vértice de la frontera** de su "
+        f"polígono queda a ≤ {_fmt(RENABAP_RADIUS_M)} m de al menos una línea activa de las redes consideradas "
+        "(colectivo del AMBA completo y, según los tildes, subte y/o ferrocarril). Tiene *acceso directo al centro* "
+        f"cuando además alguna de esas líneas entra en **{CENTER_LABEL}**. Si tiene cobertura pero ninguna línea "
+        "llega al centro, se clasifica como *solo periférico*. Se usan los vértices y no el centroide para no perder "
+        "barrios alargados (p.ej. Villa Itatí) que bordean una ruta aunque su centroide quede lejos. Las *personas* "
+        "son una estimación gruesa: familias × 4 (excluye otras tipologías). El conteo de las líneas de colectivo usa "
+        f"la geometría completa de los {_fmt(len(routes_df))} recorridos AMBA. `km_center` y `share_center` suman la "
+        "longitud de las variantes cercanas que llegan al centro y su peso sobre el total cercano: son una medida de "
+        "intensidad, no de frecuencia ni de tiempo de viaje. "
         f"Los radios de {_fmt(BARRIO_BUS_RADIUS_M)} m (colectivo) y {_fmt(BARRIO_RAIL_RADIUS_M)} m "
         "(subte/ferrocarril) que filtran las líneas mostradas en el mapa son solo de visualización; "
-        f"la cobertura se calcula siempre con {_fmt(RENABAP_RADIUS_M)} m desde los vértices de la frontera."
+        f"la cobertura y el acceso al centro se calculan siempre con {_fmt(RENABAP_RADIUS_M)} m desde los vértices."
     )
     st.markdown(
-        "**Nota:** esta app mide *proximidad espacial a la red*, no tiempo de viaje ni frecuencia de servicio. "
-        "Un barrio puede quedar cerca de una línea y aun así tener mala conexión al centro de la ciudad. "
-        f"La *demanda de las líneas a ≤ {BARRIO_BUS_RADIUS_M} m* es la suma de los usos SUBE (AMBA) de esas líneas, "
-        "un proxy de cuánto transporte circula al borde del barrio. "
-        "En una próxima etapa se podrán agregar corredores hacia destinos clave (microcentro, intercambiadores) "
-        "y tiempos de viaje."
+        "**Nota:** esta app mide *proximidad espacial a la red* y *destino directo*, no tiempo de viaje ni "
+        "frecuencia. Un barrio puede quedar cerca de una línea que no lo conecta al centro; por eso se distingue el "
+        "acceso directo. No se contabilizan transbordos: un barrio *solo periférico* podría llegar al centro "
+        f"combinando dos líneas. La *demanda de las líneas a ≤ {BARRIO_BUS_RADIUS_M} m* es la suma de los usos SUBE "
+        "(AMBA) de esas líneas, un proxy de cuánto transporte circula al borde del barrio. "
+        "En una próxima etapa se podrán agregar frecuencias, tiempos de viaje y transbordos."
     )
