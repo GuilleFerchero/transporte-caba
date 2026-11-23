@@ -24,6 +24,8 @@ from data_loaders import (
     _subte_line_color,
     point_in_polygon,
     barrio_access_profile,
+    barrio_line_distances,
+    barrio_nearest_center_line,
     route_center_flags,
     access_profile_token,
     _route_length_m,
@@ -41,6 +43,7 @@ from data_loaders import (
     RENABAP_RADIUS_M,
     CENTER_COMUNA_IDS,
     CENTER_LABEL,
+    FAMILIAS_A_PERSONAS,
     JUR_COLOR,
     FFCC_COLOR,
     LINE_COLORS,
@@ -125,11 +128,12 @@ def _find_barrio_at(lat, lon, fc) -> int | None:
 
 
 @st.cache_data(show_spinner=False)
-def _renabap_fc_with_estado(centro_ids: frozenset, perif_ids: frozenset):
+def _renabap_fc_with_estado(centro_ids: frozenset, perif_ids: frozenset, centro_info=()):
     fc = _load_renabap_geojson()
     if fc is None:
         return None
     out = copy.deepcopy(fc)
+    info = {int(bid): (float(dist), str(linea)) for bid, dist, linea in centro_info}
     for feature in out["features"]:
         eid = feature["properties"].get("id_renabap")
         try:
@@ -143,6 +147,11 @@ def _renabap_fc_with_estado(centro_ids: frozenset, perif_ids: frozenset):
         else:
             estado = "Sin cobertura"
         feature["properties"]["estado"] = estado
+        dist_linea = info.get(eid)
+        feature["properties"]["dist_centro_m"] = (
+            int(round(dist_linea[0])) if dist_linea is not None else None
+        )
+        feature["properties"]["linea_centro"] = dist_linea[1] if dist_linea is not None else None
     return out
 
 
@@ -218,6 +227,7 @@ with st.sidebar:
 profile_token = access_profile_token()
 with st.spinner("Midiendo cobertura y acceso al centro..."):
     profile = barrio_access_profile(RENABAP_RADIUS_M, CENTER_COMUNA_IDS, profile_token)
+    centro_lineas = barrio_nearest_center_line(700, profile_token)
     bus_center_flags, subte_center_flags, ffcc_center_flags = route_center_flags(
         profile_token, CENTER_COMUNA_IDS
     )
@@ -248,7 +258,6 @@ ren_full["acceso_centro"] = (
 )
 ren_full["periferico"] = ren_full["cobertura"] & ~ren_full["acceso_centro"]
 ren_full["sin_cobertura"] = ~ren_full["cobertura"]
-ren_full["personas"] = ren_full["familias"] * 4
 
 ren_centroids = ren_full.copy()
 if partido_filter != "Todos":
@@ -306,7 +315,8 @@ with k4:
         _metric_box_html(
             "Familias con acceso al centro",
             f"{_fmt(fam_centro)}<small>fam.</small>",
-            f'<span>~ {_fmt(fam_centro * 4)} personas (×4) · {_fmt_dec(pct_centro)}% de los barrios</span>',
+            f'<span>~ {_fmt(fam_centro * FAMILIAS_A_PERSONAS)} personas '
+            f'(×{FAMILIAS_A_PERSONAS}) · {_fmt_dec(pct_centro)}% de los barrios</span>',
         ),
         unsafe_allow_html=True,
     )
@@ -344,9 +354,24 @@ elif show_bus:
 bus_center_series = pd.Series(bus_center_flags, index=routes_df.index, name="acceso_centro")
 bus_routes = bus_routes.join(bus_center_series)
 
+dist_bus = {}
+dist_subte = {}
+dist_ffcc = {}
+if bar_id is not None:
+    dist_bus = barrio_line_distances(bar_id, BARRIO_BUS_RADIUS_M, "bus", profile_token)
+    if show_subte:
+        dist_subte = barrio_line_distances(bar_id, BARRIO_RAIL_RADIUS_M, "subte", profile_token)
+    if show_ffcc:
+        dist_ffcc = barrio_line_distances(bar_id, BARRIO_RAIL_RADIUS_M, "ffcc", profile_token)
+
 centro_ids = frozenset(ren_full.loc[ren_full["acceso_centro"], "id"].astype(int))
 perif_ids = frozenset(ren_full.loc[ren_full["periferico"], "id"].astype(int))
-renabap_fc = _renabap_fc_with_estado(centro_ids, perif_ids)
+centro_info = tuple(
+    (int(getattr(r, "id")), float(getattr(r, "dist_m")), str(getattr(r, "linea")))
+    for r in centro_lineas.itertuples()
+    if pd.notna(getattr(r, "dist_m"))
+)
+renabap_fc = _renabap_fc_with_estado(centro_ids, perif_ids, centro_info)
 if renabap_fc is not None:
     def style_fn(feature):
         estado = feature["properties"].get("estado")
@@ -371,18 +396,20 @@ if renabap_fc is not None:
         renabap_fc,
         style_function=style_fn,
         tooltip=GeoJsonTooltip(
-            fields=["nombre_barrio", "departamento", "estado"],
-            aliases=["Barrio", "Partido", "Estado"],
+            fields=["nombre_barrio", "departamento", "estado", "dist_centro_m", "linea_centro"],
+            aliases=["Barrio", "Partido", "Estado", "Dist. línea centro (m)", "Línea con centro"],
             localize=True,
         ),
         popup=GeoJsonPopup(
             fields=[
                 "nombre_barrio", "departamento", "localidad",
-                "familias_aproximadas", "estado", "id_renabap",
+                "familias_aproximadas", "estado", "dist_centro_m",
+                "linea_centro", "id_renabap",
             ],
             aliases=[
                 "Barrio", "Partido", "Localidad",
-                "Familias aprox.", "", "ID RE-NABAP",
+                "Familias aprox.", "Estado", "Dist. línea centro (m)",
+                "Línea con centro", "ID RE-NABAP",
             ],
             localize=True,
             style="font-size:12.5px; line-height:1.45;",
@@ -459,6 +486,7 @@ if bar_id is not None:
     st.caption(
         f"Mostrando <b>{len(bus_routes)}</b> línea(s) de colectivo a ≤ {BARRIO_BUS_RADIUS_M} m y "
         f"los trazos de <b>subte</b> y <b>ferrocarril</b> a ≤ {BARRIO_RAIL_RADIUS_M} m de <b>{barrio_sel}</b>. "
+        f"El color del barrio usa ≤ {RENABAP_RADIUS_M} m desde los vértices: lo dibujado es sólo referencia visual. "
         f"Para ver el contexto completo, tildá <i>Mostrar todas las líneas de colectivo</i> "
         f"en la barra lateral.",
         unsafe_allow_html=True,
@@ -485,6 +513,10 @@ st.markdown(
     f'<span><span style="display:inline-block;width:14px;height:14px;background:{NO_COBERTO_COLOR};'
     f'border-radius:2px;margin-right:6px;"></span>Sin cobertura</span></div>',
     unsafe_allow_html=True,
+)
+st.caption(
+    f"El color es un corte a ≤ {RENABAP_RADIUS_M} m desde los vértices del barrio; "
+    f"la franja {RENABAP_RADIUS_M}–{BARRIO_BUS_RADIUS_M} m es límite/transición y no cambia el estado."
 )
 
 st_folium(m, width="100%", height=650, returned_objects=["last_object_clicked", "last_clicked"], key="acceso_map")
@@ -550,13 +582,15 @@ if bar_id is not None:
     )
 
     det_rows = []
-    for _, r in bus_routes.iterrows():
+    for idx, r in bus_routes.iterrows():
+        dist = dist_bus.get(int(idx))
         det_rows.append(
             {
                 "Modo": "Colectivo",
                 "Línea": r["linea"],
                 "Ramal": r.get("recorrido"),
                 "Sentido": r.get("sentido"),
+                "Distancia (m)": int(round(dist)) if dist is not None else None,
                 "Km de variante": float(r.get("longitud_m") or 0.0) / 1000.0,
                 "Llega al centro": "Sí" if bool(r.get("acceso_centro")) else "No",
             }
@@ -565,12 +599,14 @@ if bar_id is not None:
         subte_df = load_subte_lines()
         for pos in sorted(near_subte_idx):
             r = subte_df.iloc[pos]
+            dist = dist_subte.get(pos)
             det_rows.append(
                 {
                     "Modo": "Subte",
                     "Línea": r.get("label"),
                     "Ramal": None,
                     "Sentido": None,
+                    "Distancia (m)": int(round(dist)) if dist is not None else None,
                     "Km de variante": _route_length_m(r["coords"]) / 1000.0,
                     "Llega al centro": "Sí" if subte_center_flags[pos] else "No",
                 }
@@ -579,26 +615,44 @@ if bar_id is not None:
         ffcc_df = load_ffcc_lines()
         for pos in sorted(near_ffcc_idx):
             r = ffcc_df.iloc[pos]
+            dist = dist_ffcc.get(pos)
             det_rows.append(
                 {
                     "Modo": "Ferrocarril",
                     "Línea": r.get("linea"),
                     "Ramal": r.get("descrip"),
                     "Sentido": None,
+                    "Distancia (m)": int(round(dist)) if dist is not None else None,
                     "Km de variante": _route_length_m(r["coords"]) / 1000.0,
                     "Llega al centro": "Sí" if ffcc_center_flags[pos] else "No",
                 }
             )
     if det_rows:
         det = pd.DataFrame(det_rows).sort_values(
-            ["Llega al centro", "Km de variante"], ascending=[False, False]
+            ["Llega al centro", "Distancia (m)", "Km de variante"],
+            ascending=[False, True, False],
+            na_position="last",
         )
         with st.expander(f"Líneas cercanas a {barrio_sel} y acceso al centro"):
+            dist_min = det["Distancia (m)"].min()
+            dist_txt = f"{int(round(dist_min))} m" if pd.notna(dist_min) else "s/d"
+            centro_row = centro_lineas[centro_lineas["id"] == bar_id]
+            if not centro_row.empty and pd.notna(centro_row.iloc[0]["dist_m"]):
+                centro_txt = (
+                    f"Colectivo con centro más cercano: {centro_row.iloc[0]['linea']} a "
+                    f"{int(round(centro_row.iloc[0]['dist_m']))} m."
+                )
+            else:
+                centro_txt = "Sin colectivo con centro a ≤ 700 m."
+            st.caption(f"Distancia mínima a la red visible: {dist_txt}. {centro_txt}")
             st.dataframe(
                 det,
                 width="stretch",
                 hide_index=True,
-                column_config={"Km de variante": st.column_config.NumberColumn(format="%.2f")},
+                column_config={
+                    "Distancia (m)": st.column_config.NumberColumn(format="%.0f m"),
+                    "Km de variante": st.column_config.NumberColumn(format="%.2f"),
+                },
             )
             st.caption(
                 "Km de variante = longitud del recorrido/variante; el acceso directo no considera transbordos. "
@@ -651,13 +705,14 @@ with st.expander("Sobre los datos y la metodología"):
         f"cuando además alguna de esas líneas entra en **{CENTER_LABEL}**. Si tiene cobertura pero ninguna línea "
         "llega al centro, se clasifica como *solo periférico*. Se usan los vértices y no el centroide para no perder "
         "barrios alargados (p.ej. Villa Itatí) que bordean una ruta aunque su centroide quede lejos. Las *personas* "
-        "son una estimación gruesa: familias × 4 (excluye otras tipologías). El conteo de las líneas de colectivo usa "
+        f"son una estimación gruesa: familias × {FAMILIAS_A_PERSONAS} (excluye otras tipologías). El conteo de las líneas de colectivo usa "
         f"la geometría completa de los {_fmt(len(routes_df))} recorridos AMBA. `km_center` y `share_center` suman la "
         "longitud de las variantes cercanas que llegan al centro y su peso sobre el total cercano: son una medida de "
         "intensidad, no de frecuencia ni de tiempo de viaje. "
         f"Los radios de {_fmt(BARRIO_BUS_RADIUS_M)} m (colectivo) y {_fmt(BARRIO_RAIL_RADIUS_M)} m "
         "(subte/ferrocarril) que filtran las líneas mostradas en el mapa son solo de visualización; "
-        f"la cobertura y el acceso al centro se calculan siempre con {_fmt(RENABAP_RADIUS_M)} m desde los vértices."
+        f"la cobertura y el acceso al centro se calculan siempre con {_fmt(RENABAP_RADIUS_M)} m desde los vértices. "
+        "Las distancias informadas van de vértices del polígono a puntos de la red (no a tramos), así que son orientativas."
     )
     st.markdown(
         "**Nota:** esta app mide *proximidad espacial a la red* y *destino directo*, no tiempo de viaje ni "

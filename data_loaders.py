@@ -200,6 +200,7 @@ RENABAP_COLOR = "#d62728"
 RENABAP_RADIUS_M = 300
 CENTER_COMUNA_IDS = (1, 3)
 CENTER_LABEL = "Centro (comunas 1 y 3)"
+FAMILIAS_A_PERSONAS = 4
 
 # Feriados nacionales argentinos (inamovibles, trasladables y puentes), fuente
 # oficial DDJJ (https://api.argentinadatos.com/v1/feriados/). Se actualizan a mano
@@ -726,8 +727,14 @@ def _download_to_file(path: str, url: str, timeout: int, kind: str = "bin") -> N
         json.loads(resp.content.decode("utf-8-sig"))
     elif kind == "csv" and not resp.content.strip():
         raise ValueError("archivo CSV vacío")
-    with open(path, "wb") as f:
-        f.write(resp.content)
+    tmp = path + ".part"
+    try:
+        with open(tmp, "wb") as f:
+            f.write(resp.content)
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
 
 
 @st.cache_data(show_spinner=False)
@@ -1457,6 +1464,13 @@ def load_sube_daily(token: str) -> pd.DataFrame:
         return pd.DataFrame(columns=["linea", "fecha", "transacciones", "tipo_dia"])
     df["fecha"] = pd.to_datetime(df["fecha"])
     return df.sort_values(["linea", "fecha"]).reset_index(drop=True)
+
+
+def sube_usos_por_km(routes_df: pd.DataFrame, linea: str, line_sube: pd.DataFrame) -> float:
+    """Usos de los últimos 12 meses sobre la longitud total (ida y vuelta) de la línea."""
+    km = float(routes_df.loc[routes_df["linea"] == linea, "longitud_m"].sum()) / 1000.0
+    total = line_sube.sort_values("fecha").tail(12)["transacciones"].sum()
+    return float(total / km) if km > 0 else float("nan")
 
 
 # ---------------------------------------------------------------------------
@@ -2278,13 +2292,104 @@ def barrio_access_profile(
 
 
 @st.cache_data(show_spinner=False)
+def barrio_line_distances(bar_id: int, radius_m: int, network: str, token: str = "") -> dict:
+    """Distancia mínima en metros de cada línea al barrio, por índice de fila de la red."""
+    ren = load_renabap_points()
+    bpts = ren[ren["id"] == bar_id]
+    if bpts.empty:
+        return {}
+    if network == "bus":
+        lat, lon, owner = bus_network(token)
+    elif network == "subte":
+        lat, lon, owner = subte_network(token)
+    elif network == "ffcc":
+        lat, lon, owner = ffcc_network(token)
+    else:
+        return {}
+    if lat.size == 0:
+        return {}
+    grid, meta = build_point_grid(lat, lon, cell_m=radius_m)
+    hits, _ = _grid_matches(grid, meta, lat, lon, bpts["lat"], bpts["lon"], radius_m)
+    if not hits:
+        return {}
+    blat = bpts["lat"].to_numpy(dtype=float)
+    blon = bpts["lon"].to_numpy(dtype=float)
+    best = {}
+    for idx in np.asarray(sorted(hits), dtype=int):
+        dist = float(_haversine_np(blat, blon, lat[idx], lon[idx]).min())
+        key = int(owner[idx])
+        if key not in best or dist < best[key]:
+            best[key] = dist
+    return best
+
+
+@st.cache_data(show_spinner=False)
+def barrio_nearest_center_line(radius_m: int = 700, token: str = "") -> pd.DataFrame:
+    """Colectivo con centro más cercano por barrio: id, dist_m, owner y línea."""
+    base = load_renabap_centroids()[["id"]].copy()
+    base["id"] = pd.to_numeric(base["id"], errors="coerce")
+    base = base.dropna(subset=["id"]).astype({"id": int}).drop_duplicates().reset_index(drop=True)
+    base["dist_m"] = np.nan
+    base["owner"] = pd.NA
+    base["linea"] = pd.NA
+    ren = load_renabap_points().copy()
+    ren["id"] = pd.to_numeric(ren["id"], errors="coerce")
+    ren = ren.dropna(subset=["id"])
+    if ren.empty:
+        return base
+    ren["id"] = ren["id"].astype(int)
+    bus_flags, _, _ = route_center_flags(token, CENTER_COMUNA_IDS)
+    center_owners = np.asarray([i for i, flag in enumerate(bus_flags) if flag], dtype=int)
+    if center_owners.size == 0:
+        return base
+    lat, lon, owner = bus_network(token)
+    sel = np.isin(owner, center_owners)
+    if not sel.any():
+        return base
+    clat, clon, cowner = lat[sel], lon[sel], owner[sel]
+    grid, meta = build_point_grid(clat, clon, cell_m=radius_m)
+    blat = ren["lat"].to_numpy(dtype=float)
+    blon = ren["lon"].to_numpy(dtype=float)
+    bids = ren["id"].to_numpy(dtype=int)
+    lat_m, lon_m, cell_m = meta
+    steps = int(np.ceil(radius_m / cell_m)) + 1
+    best = {}
+    for k in range(blat.size):
+        gk_lat = int(blat[k] * lat_m / cell_m)
+        gk_lon = int(blon[k] * lon_m / cell_m)
+        for di in range(-steps, steps + 1):
+            for dj in range(-steps, steps + 1):
+                bucket = grid.get((gk_lat + di, gk_lon + dj))
+                if not bucket:
+                    continue
+                idx = np.asarray(bucket, dtype=int)
+                d = _haversine_np(blat[k], blon[k], clat[idx], clon[idx])
+                mask = d <= radius_m
+                if not mask.any():
+                    continue
+                for j, dist in zip(idx[mask], d[mask]):
+                    key = int(bids[k])
+                    o = int(cowner[j])
+                    if key not in best or dist < best[key][0]:
+                        best[key] = (float(dist), o)
+    if not best:
+        return base
+    rows = pd.DataFrame(
+        [{"id": bid, "dist_m": dist, "owner": o} for bid, (dist, o) in best.items()]
+    )
+    routes = load_routes_df()
+    rows["linea"] = rows["owner"].map(lambda i: routes.iloc[int(i)].get("linea"))
+    return base[["id"]].merge(rows, on="id", how="left")
+
+
+@st.cache_data(show_spinner=False)
 def comuna_demand_table(stops_df: pd.DataFrame, sube: pd.DataFrame) -> pd.DataFrame:
     stops_caba = stops_df.copy()
     stops_caba["comuna"] = pd.to_numeric(stops_caba["comuna"], errors="coerce")
     stops_caba = stops_caba[stops_caba["comuna"].between(1, 15)].dropna(subset=["comuna"])
     stops_caba["comuna"] = stops_caba["comuna"].astype(int)
     if stops_caba.empty or sube.empty:
-        return pd.DataFrame(columns=["comuna", "usos", "paradas"])
+        return pd.DataFrame(columns=["comuna", "usos"])
 
     counts = stops_caba.groupby(["linea", "comuna"], as_index=False).size()
     counts = counts.rename(columns={"size": "paradas"})

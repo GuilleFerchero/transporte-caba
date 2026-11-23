@@ -325,6 +325,27 @@ def test_paridad() -> None:
     check("renabap: > 1000 barrios AMBA", len(ren["features"]) > 1000, str(len(ren["features"])))
 
 
+def test_usos_km() -> None:
+    section("A6. Usos por km con longitud completa de la línea")
+    routes = dl.load_routes_df()
+    sube = dl.load_sube_transactions("check")
+    linea = "152"
+    line_sube = sube[sube["linea"] == linea].sort_values("fecha")
+    if routes.empty or line_sube.empty:
+        check("datos disponibles para usos/km", False, "faltan routes o sube")
+        return
+    km_total = float(routes.loc[routes["linea"] == linea, "longitud_m"].sum()) / 1000.0
+    km_ida = float(
+        routes.loc[(routes["linea"] == linea) & (routes["sentido"] == "IDA"), "longitud_m"].sum()
+    ) / 1000.0
+    check("línea 152: ida < ida+vuelta", 0 < km_ida < km_total,
+          f"ida={km_ida:,.1f}km total={km_total:,.1f}km")
+    valor = dl.sube_usos_por_km(routes, linea, line_sube)
+    esperado = float(line_sube.tail(12)["transacciones"].sum()) / km_total
+    check("usos/km = usos 12m / km ida+vuelta", abs(valor - esperado) < 1e-6,
+          f"{valor:,.1f} vs {esperado:,.1f}")
+
+
 def main() -> int:
     print("Chequeo del bundle:", dl.BUNDLE_DIR)
     print("schema_version esperado:", dl.BUNDLE_SCHEMA_VERSION)
@@ -333,6 +354,7 @@ def main() -> int:
     test_sube_daily_dtype()
     test_grid_matches()
     test_acceso_centro()
+    test_usos_km()
     test_paridad()
 
     print()

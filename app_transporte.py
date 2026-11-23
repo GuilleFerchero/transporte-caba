@@ -19,6 +19,7 @@ from data_loaders import (
     load_comunas,
     load_sube_transactions,
     load_sube_daily,
+    sube_usos_por_km,
     _load_renabap_geojson,
     _sube_source_token,
     _subte_line_color,
@@ -242,7 +243,7 @@ with col_info:
             total_anual = sube_12["transacciones"].sum()
             ult_mes = sube_12["fecha"].iloc[-1]
             usos_dia = sube_12["transacciones"].iloc[-1] / ult_mes.days_in_month
-            usos_km = total_anual / total_km if total_km > 0 else float("nan")
+            usos_km = sube_usos_por_km(routes_df, linea, line_sube)
 
             delta_anual = None
             if len(line_sube) >= 24:
@@ -273,7 +274,7 @@ with col_info:
                     _metric_box_html(
                         f"Recorrido · Línea {linea}",
                         f'{_fmt_dec(total_km)}<small>km</small>',
-                        f'<span>Longitud ida + vuelta ({len(line_routes)} recorrido(s))</span>',
+                        f'<span>Longitud visible ({len(line_routes)} recorrido(s))</span>',
                     ),
                     unsafe_allow_html=True,
                 )

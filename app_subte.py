@@ -368,7 +368,6 @@ else:
 b_end = _clamp_end(mol, b_start, b_end, base_year)
 r_start = b_start - pd.DateOffset(years=1)
 r_end = b_end - pd.DateOffset(years=1)
-año_parcial = b_end < _window(base_year)[1]
 
 with st.spinner("Calculando perfiles horarios..."):
     per_file, ndays = _perfil_horario(token, b_start, b_end, tuple(lineas))

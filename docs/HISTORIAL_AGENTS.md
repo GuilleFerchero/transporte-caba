@@ -33,9 +33,9 @@ commiteado y `requirements.txt`.
 - **`load_renabap_centroids()`** devuelve un DataFrame vacío si no puede cargar
   RE-NABAP, pero no emite `st.warning` por sí misma. El warning aparece en
   `_build_sube_aggregates()` y en los loaders que usan `_load_geojson_safe()`.
-- **Texto desactualizado en `app_acceso.py`**: la metodología visible todavía
-  dice "~1.274 recorridos AMBA"; el dato real actual es 2.199. Es un texto de
-  la app, no una constante de datos.
+- **Recorridos AMBA en `app_acceso.py`**: la metodología visible usa
+  `_fmt(len(routes_df))` y ya no fija "~1.274"; con el bundle actual muestra
+  2.199. Es un texto derivado del dato, no una constante hardcodeada.
 - **Versiones de dependencias**: `requirements.txt` fija `requests==2.34.2`
   (no 2.32.3), `pyarrow==25.0.1`, `streamlit==1.63.0`, `folium==0.20.0`,
   `streamlit-folium==0.27.4`, `pandas==3.0.5`, `numpy==2.5.2` y
@@ -402,8 +402,8 @@ de la Ciudad (BA Data) y la Secretaría de Transporte (RMBA).
   el volumen). El **slider de franja** devuelve una tupla; si llega un escalar
   se interpreta como "todo el día" (por robustez, no debería pasar en el
   browser).
-- Nota: el caption final de `app_subte.py` todavía dice "Mapa base:
-  OpenStreetMap / CARTO", pero el basemap real es Esri/OSM.de según `MAP_THEMES`.
+- Nota: el caption final de `app_subte.py` ya usa `BASEMAP_LABELS` y muestra
+  Esri/OSM.de según el tema elegido; no queda texto de CARTO en la UI.
 
 ## Detalles técnicos / lecciones aprendidas
 
@@ -564,7 +564,9 @@ streamlit run app_subte.py        # Viajes del Subte por molinete (SBASE)
   - `1afb41d` Lectura local de `data/` con descarga como respaldo; `data/` en .gitignore
   - `4e4013a` Evolutivo mensual de transacciones SUBE por línea + distancia en km;
     fix de reruns `returned_objects=[]`; AGENTS.md
-- El historial actual tiene 34 commits; HEAD es `5ffb38b` ("Ignorar .vscode/").
+- El historial tiene 34 commits en este tramo; el HEAD registrado en la última
+  revisión (2026-11-23) es `25aa1b2` ("Tipografía Inter global y quitar
+  antetítulo de app_acceso").
   Hitos posteriores relevantes: `6056ec1` (elimina `backup/app.py`),
   `2db0c0c` (auditoría + smoke test de paridad), `cf17615` (bundle
   precomputado), `bd26ac0` (rediseño de `app_subte.py` y tema compartido),
@@ -573,7 +575,7 @@ streamlit run app_subte.py        # Viajes del Subte por molinete (SBASE)
 
 ## Entorno
 
-- Windows, shell PowerShell. Python 3.13.2 en local. La app corre en el venv
+- Windows, shell PowerShell. Python 3.12.10 en local. La app corre en el venv
   `venv/` del repo. Docker usa `python:3.12-slim`.
 - Librerías fijadas en `requirements.txt`: streamlit 1.63.0, folium 0.20.0,
   streamlit-folium 0.27.4, pandas 3.0.5, numpy 2.5.2, altair 6.2.2,
@@ -606,8 +608,6 @@ streamlit run app_subte.py        # Viajes del Subte por molinete (SBASE)
   directo, 521 solo periféricos (169.212 familias) y 400 sin cobertura. Ideas a
   futuro: transbordos, frecuencias, tiempos de viaje, estaciones terminales y
   exportación por barrio.
-- Corregir el caption de `app_subte.py` que menciona CARTO (el basemap real es
-  Esri/OSM.de).
 
 ## Deploy
 

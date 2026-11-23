@@ -40,9 +40,10 @@ streamlit run app_subte.py        # viajes por molinete (SBASE)
 ## Decisiones técnicas vigentes
 - Dedupe RMBA **solo por número de línea y contra BA Data**; nunca entre features RMBA (cada uno es una variante; deduplicar pierde ~95% de km).
 - SUBE se identifica **solo por grafía** (`SUBE_LINEA_RE` / `_is_amba_sube_code`), no por jurisdicción/provincia: acepta CABA/BSAS/BS_AS/LINEA..., rechaza `RZ` y códigos pelados.
+- `usos/km` en `app_transporte`: `sube_usos_por_km` divide los usos SUBE de los últimos 12 meses por los km **ida+vuelta completos** de la línea, sin importar los filtros de recorrido/sentido del mapa; la sección A6 de `check_bundle_parity.py` lo valida.
 - Caché `@st.cache_data` con tokens de mtime (`_data_token`, `_sube_source_token`, `_molinetes_source_token`); nunca pasar DataFrames con listas.
 - Cobertura RE-NABAP con grilla de 100 m (`build_point_grid`/`_grid_matches`) contra vértices de frontera, no centroides; `stops_near_route` solo para OSM.
-- Acceso al centro en `app_acceso`: 3 estados (con acceso, solo periférico, sin cobertura). "Con acceso" = frontera a ≤300 m de una línea que entra en `CENTER_COMUNA_IDS=(1,3)`; `km_center`/`share_center` son intensidad, no frecuencia. `barrio_access_profile`/`route_center_flags` se calculan en runtime con caché (no tocan el bundle); la sección A5 de `check_bundle_parity.py` los valida.
+- Acceso al centro en `app_acceso`: 3 estados (con acceso, solo periférico, sin cobertura). "Con acceso" = frontera a ≤300 m de una línea que entra en `CENTER_COMUNA_IDS=(1,3)`; `km_center`/`share_center` son intensidad, no frecuencia. `barrio_access_profile`/`route_center_flags` se calculan en runtime con caché (no tocan el bundle); la sección A5 de `check_bundle_parity.py` los valida. La UI muestra distancias y línea con centro en tooltip/ficha; el color es corte duro a ≤300 m y la franja 300-500 m es sólo transición visual, no cambio de estado.
 - `longitud_m` debe seguir `float`; `_read_parquet_bundle` convierte geometrías a listas Python (`_deep_python`).
 - Feriados: `FERIADOS_ARG` estático 2024-2027; actualizarlo al publicarse un año nuevo.
 - Mapas: Esri dark/light + OSM.de (CARTO/OSM.org se cuelgan); `st_folium(..., returned_objects=[])` salvo en `app_acceso` (clic de barrio).
