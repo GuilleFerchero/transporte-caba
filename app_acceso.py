@@ -64,6 +64,10 @@ CENTER_STATE_LABEL = "Línea que toca el centro (sin transbordos)"
 RADIUS_OPTIONS = (100, 200, 300, 400, 500, 750, 1000)
 DEFAULT_RADIUS_M = RENABAP_RADIUS_M
 CENTER_LOOKUP_RADIUS_M = 700
+CONTACT_NAME = "Guille Ferchero"
+CONTACT_EMAIL = "guilleferchero@gmail.com"
+CONTACT_GITHUB = "GuilleFerchero"
+CONTACT_GITHUB_URL = f"https://github.com/{CONTACT_GITHUB}"
 
 
 def _bundle_cut_label() -> str:
@@ -776,4 +780,11 @@ with st.expander("Sobre los datos y la metodología"):
         f"combinando dos líneas. La *demanda de las líneas a ≤ {BARRIO_BUS_RADIUS_M} m* es la suma de los usos SUBE "
         "(AMBA) de esas líneas, un proxy de cuánto transporte circula al borde del barrio. "
         "En una próxima etapa se podrán agregar frecuencias, tiempos de viaje y transbordos."
+    )
+
+with st.sidebar:
+    st.markdown("---")
+    st.caption(
+        f"**Contacto:** {CONTACT_NAME} · "
+        f"[email](mailto:{CONTACT_EMAIL}) · [GitHub]({CONTACT_GITHUB_URL})"
     )
