@@ -61,6 +61,9 @@ NO_COBERTO_COLOR = "#d62728"
 BARRIO_BUS_RADIUS_M = 500
 BARRIO_RAIL_RADIUS_M = 1200
 CENTER_STATE_LABEL = "Línea que toca el centro (sin transbordos)"
+RADIUS_OPTIONS = (100, 200, 300, 400, 500, 750, 1000)
+DEFAULT_RADIUS_M = RENABAP_RADIUS_M
+CENTER_LOOKUP_RADIUS_M = 700
 
 
 def _bundle_cut_label() -> str:
@@ -84,6 +87,24 @@ with st.spinner("Cargando datos..."):
     routes_df = load_routes_df()
     ren_centroids_full = load_renabap_centroids()
 
+with st.sidebar:
+    st.markdown("### Escenario de cercanía")
+    radius_m = st.select_slider(
+        "Radio de cercanía al trazado (escenario)",
+        options=RADIUS_OPTIONS,
+        value=DEFAULT_RADIUS_M,
+        key="acceso_radius_m",
+        help=(
+            "Cambia la clasificación del mapa y los KPIs. "
+            "300 m es la medición de referencia; otros valores son escenarios what-if. "
+            "No cambia frecuencias, tiempos de viaje ni transbordos."
+        ),
+    )
+    st.caption(
+        f"Escenario activo: ≤ {radius_m} m al trazado. "
+        f"Referencia fija: {DEFAULT_RADIUS_M} m."
+    )
+
 st.markdown(
     app_header_html(
         "",
@@ -92,7 +113,7 @@ st.markdown(
         chips=[
             f"AMBA total · {_fmt(len(ren_centroids_full))} barrios RE-NABAP",
             f"Red de colectivo <b>{_fmt(len(routes_df))} recorridos</b>",
-            f"Umbral de cercanía <b>{_fmt_dec(RENABAP_RADIUS_M)} m</b>",
+            f"Escenario activo · <b>≤ {_fmt_dec(radius_m)} m</b>",
             f"Centro: línea que toca <b>{CENTER_LABEL}</b>",
             f"RE-NABAP 2023 · {_bundle_cut_label()}",
         ],
@@ -187,7 +208,7 @@ with st.sidebar:
         "Estado de acceso",
         ["Todos", CENTER_STATE_LABEL, "Solo periférico", "Sin cobertura"],
         help=(
-            f"{CENTER_STATE_LABEL}: un vértice del barrio está a ≤ {RENABAP_RADIUS_M} m del trazado "
+            f"{CENTER_STATE_LABEL}: un vértice del barrio está a ≤ {radius_m} m del trazado "
             f"y alguna línea entra en {CENTER_LABEL}. Solo periférico: cerca de la red, pero sin línea al centro."
         ),
     )
@@ -226,9 +247,10 @@ with st.sidebar:
     )
 
 profile_token = access_profile_token()
+centro_lookup_radius_m = max(radius_m, CENTER_LOOKUP_RADIUS_M)
 with st.spinner("Midiendo cobertura y línea al centro..."):
-    profile = barrio_access_profile(RENABAP_RADIUS_M, CENTER_COMUNA_IDS, profile_token)
-    centro_lineas = barrio_nearest_center_line(700, profile_token)
+    profile = barrio_access_profile(radius_m, CENTER_COMUNA_IDS, profile_token)
+    centro_lineas = barrio_nearest_center_line(centro_lookup_radius_m, profile_token)
     bus_center_flags, subte_center_flags, ffcc_center_flags = route_center_flags(
         profile_token, CENTER_COMUNA_IDS
     )
@@ -285,13 +307,18 @@ total_familias = int(ren_centroids["familias"].sum())
 pct_centro = 100.0 * con_centro / total_barrios if total_barrios else 0.0
 pct_fam_centro = 100.0 * fam_centro / total_familias if total_familias else 0.0
 
+st.caption(
+    f"Escenario activo: **≤ {radius_m} m** al trazado. "
+    "Cambia la clasificación, no la frecuencia ni el tiempo de viaje."
+)
+
 k1, k2, k3, k4 = st.columns(4)
 with k1:
     st.markdown(
         _metric_box_html(
             "Barrios con línea al centro",
             f'<span style="color:{CENTER_COLOR};">{_fmt(con_centro)}<small>/ {_fmt(total_barrios)}</small></span>',
-            f'<span>vértice a ≤ {RENABAP_RADIUS_M} m del trazado y línea que toca {CENTER_LABEL}</span>',
+            f'<span>vértice a ≤ {radius_m} m del trazado y línea que toca {CENTER_LABEL}</span>',
         ),
         unsafe_allow_html=True,
     )
@@ -309,7 +336,7 @@ with k3:
         _metric_box_html(
             "Barrios sin cobertura",
             f'<span style="color:{NO_COBERTO_COLOR};">{_fmt(sin_cob)}</span>',
-            f'<span>sin red considerada a ≤ {RENABAP_RADIUS_M} m del trazado</span>',
+            f'<span>sin red considerada a ≤ {radius_m} m del trazado</span>',
         ),
         unsafe_allow_html=True,
     )
@@ -334,7 +361,7 @@ if show_ffcc:
 if suffix:
     red_label += " + " + " y ".join(suffix)
 st.caption(
-    f"<b>{CENTER_STATE_LABEL}</b>: algún vértice de la frontera cae a ≤ {RENABAP_RADIUS_M} m del <b>trazado</b> "
+    f"<b>{CENTER_STATE_LABEL}</b>: algún vértice de la frontera cae a ≤ {radius_m} m del <b>trazado</b> "
     f"de una línea de {red_label} que entra en {CENTER_LABEL}. Si está cerca pero ninguna línea toca el centro, es "
     "<b>solo periférico</b>; si no hay red cerca, <b>sin cobertura</b>. "
     "Sin transbordos; km y share son intensidad, no frecuencia.",
@@ -379,7 +406,7 @@ renabap_fc = _renabap_fc_with_estado(centro_ids, perif_ids, centro_info)
 if renabap_fc is not None:
     def style_fn(feature):
         estado = feature["properties"].get("estado")
-        if estado.startswith("Con acceso"):
+        if estado.startswith(CENTER_STATE_LABEL):
             color = CENTER_COLOR
         elif estado.startswith("Solo periférico"):
             color = PERIF_COLOR
@@ -490,7 +517,7 @@ if bar_id is not None:
     st.caption(
         f"Mostrando <b>{len(bus_routes)}</b> línea(s) de colectivo a ≤ {BARRIO_BUS_RADIUS_M} m y "
         f"los trazos de <b>subte</b> y <b>ferrocarril</b> a ≤ {BARRIO_RAIL_RADIUS_M} m de <b>{barrio_sel}</b>. "
-        f"El color del barrio usa ≤ {RENABAP_RADIUS_M} m desde los vértices: lo dibujado es sólo referencia visual. "
+        f"El color del barrio usa ≤ {radius_m} m desde los vértices: lo dibujado es sólo referencia visual. "
         f"Para ver el contexto completo, tildá <i>Mostrar todas las líneas de colectivo</i> "
         f"en la barra lateral.",
         unsafe_allow_html=True,
@@ -518,9 +545,18 @@ st.markdown(
     f'border-radius:2px;margin-right:6px;"></span>Sin cobertura</span></div>',
     unsafe_allow_html=True,
 )
+if radius_m < BARRIO_BUS_RADIUS_M:
+    transition_txt = (
+        f"la franja {radius_m}–{BARRIO_BUS_RADIUS_M} m es límite/transición y no cambia el estado."
+    )
+else:
+    transition_txt = (
+        f"el radio del escenario alcanza o supera los {BARRIO_BUS_RADIUS_M} m de dibujo de colectivo; "
+        "el mapa puede no mostrar todas las líneas que justifican el color."
+    )
 st.caption(
-    f"El color es un corte a ≤ {RENABAP_RADIUS_M} m entre los vértices del barrio y el trazado de la red; "
-    f"la franja {RENABAP_RADIUS_M}–{BARRIO_BUS_RADIUS_M} m es límite/transición y no cambia el estado."
+    f"El color es un corte a ≤ {radius_m} m entre los vértices del barrio y el trazado de la red; "
+    f"{transition_txt}"
 )
 
 st_folium(m, width="100%", height=650, returned_objects=["last_object_clicked", "last_clicked"], key="acceso_map")
@@ -580,7 +616,7 @@ if bar_id is not None:
         _metric_box_html(
             f"Km de líneas cercanas que llegan a {CENTER_LABEL}",
             f"{_fmt_dec(km_centro_visible)}<small>km</small>",
-            f"<span>{_fmt_dec(share_visible)}% del km cercano (≤{RENABAP_RADIUS_M} m) · no pondera frecuencia</span>",
+            f"<span>{_fmt_dec(share_visible)}% del km cercano (≤{radius_m} m) · no pondera frecuencia</span>",
         ),
         unsafe_allow_html=True,
     )
@@ -647,7 +683,7 @@ if bar_id is not None:
                     f"{int(round(centro_row.iloc[0]['dist_m']))} m."
                 )
             else:
-                centro_txt = "Sin colectivo con centro a ≤ 700 m."
+                centro_txt = f"Sin colectivo con centro a ≤ {centro_lookup_radius_m} m."
             st.caption(f"Distancia mínima a la red visible: {dist_txt}. {centro_txt}")
             st.dataframe(
                 det,
@@ -694,11 +730,13 @@ resumen = resumen.rename(
 
 st.dataframe(resumen, width="stretch", hide_index=True)
 
-csv = resumen.to_csv(index=False).encode("utf-8-sig")
+csv_df = resumen.copy()
+csv_df.insert(0, "Escenario (m)", radius_m)
+csv = csv_df.to_csv(index=False).encode("utf-8-sig")
 st.download_button(
     "Descargar resumen (CSV)",
     data=csv,
-    file_name="acceso_centro_renabap_amba.csv",
+    file_name=f"acceso_centro_renabap_amba_{radius_m}m.csv",
     mime="text/csv",
 )
 
@@ -715,7 +753,7 @@ with st.expander("Sobre los datos y la metodología"):
     )
     st.markdown(
         "**Metodología:** un barrio popular tiene *cobertura* cuando algún **vértice de la frontera** de su "
-        f"polígono queda a ≤ {_fmt(RENABAP_RADIUS_M)} m del <b>trazado</b> de al menos una línea activa de las redes consideradas "
+        f"polígono queda a ≤ {_fmt(radius_m)} m del <b>trazado</b> de al menos una línea activa de las redes consideradas "
         "(colectivo del AMBA completo y, según los tildes, subte y/o ferrocarril). Tiene *línea que toca el centro* "
         f"cuando además alguna de esas líneas entra en **{CENTER_LABEL}**. Si tiene cobertura pero ninguna línea "
         "llega al centro, se clasifica como *solo periférico*. Se usan los vértices y no el centroide para no perder "
@@ -726,7 +764,9 @@ with st.expander("Sobre los datos y la metodología"):
         "intensidad, no de frecuencia ni de tiempo de viaje. "
         f"Los radios de {_fmt(BARRIO_BUS_RADIUS_M)} m (colectivo) y {_fmt(BARRIO_RAIL_RADIUS_M)} m "
         "(subte/ferrocarril) que filtran las líneas mostradas en el mapa son solo de visualización; "
-        f"la cobertura y la línea al centro se calculan siempre con {_fmt(RENABAP_RADIUS_M)} m desde los vértices al trazado. "
+        f"la cobertura y la línea al centro se calculan siempre con {_fmt(radius_m)} m desde los vértices al trazado. "
+        f"{_fmt(DEFAULT_RADIUS_M)} m es la medición de referencia; los demás valores son escenarios what-if, "
+        "no una medición oficial. Ninguno modela frecuencia, tiempo de viaje ni transbordos. "
         "Las distancias informadas van de vértices del polígono a puntos de la red (no a tramos), así que son orientativas."
     )
     st.markdown(

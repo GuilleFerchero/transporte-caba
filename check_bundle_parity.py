@@ -184,6 +184,37 @@ def test_acceso_centro() -> None:
           centro <= cubiertos and bool(centro) and bool(perif),
           f"centro={len(centro)} perif={len(perif)}")
 
+    def _ids_por_estado(perfil: pd.DataFrame) -> tuple[set[int], set[int]]:
+        cubiertos_esc = set(
+            perfil.loc[
+                perfil["bus_near"] | perfil["subte_near"] | perfil["ffcc_near"], "id"
+            ]
+        )
+        centro_esc = set(
+            perfil.loc[
+                perfil["bus_center"] | perfil["subte_center"] | perfil["ffcc_center"], "id"
+            ]
+        )
+        return cubiertos_esc, centro_esc
+
+    for radio in (100, 1000):
+        perfil_esc = dl.barrio_access_profile(radio, dl.CENTER_COMUNA_IDS, token)
+        cubiertos_esc, centro_esc = _ids_por_estado(perfil_esc)
+        check(f"escenario {radio} m: una fila por barrio",
+              len(perfil_esc) == len(centroids),
+              f"{len(perfil_esc)} vs {len(centroids)}")
+        check(f"escenario {radio} m: centro ⊆ cobertura",
+              centro_esc <= cubiertos_esc,
+              f"centro={len(centro_esc)} cobertura={len(cubiertos_esc)}")
+        if radio < dl.RENABAP_RADIUS_M:
+            check(f"escenario {radio} m: cobertura no excede la de 300 m",
+                  cubiertos_esc <= nuevos and centro_esc <= centro,
+                  f"cobertura={len(cubiertos_esc)} centro={len(centro_esc)}")
+        else:
+            check(f"escenario {radio} m: cobertura no decrece vs 300 m",
+                  nuevos <= cubiertos_esc and centro <= centro_esc,
+                  f"cobertura={len(cubiertos_esc)} centro={len(centro_esc)}")
+
 
 # ---------------------------------------------------------------------------
 # B) paridad bundle <-> crudo
